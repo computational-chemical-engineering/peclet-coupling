@@ -57,7 +57,24 @@ Both cases pass identically on **host-openmp and CUDA (RTX 5080)**:
 - **`test_fixed_bed_ergun.py`** — uniform fixed bed (one particle per cell, ε = 0.6): the measured
   (f_drive, U) pair lands on the Ergun curve to **0.0 %** across the viscous, transition and inertial
   (Re_p ≈ 6) regimes — validating ε deposition, both Ergun terms, and the stable two-way feedback.
+- **`test_mpi_fixed_bed_ergun.py`** — the fixed-bed Ergun benchmark run **distributed** (flow
+  `init_mpi`, each rank couples its ORB block; particle deposits fold across ranks + periodically via
+  the reverse/add-reduce halo `exchange_field_add`, deposit origin shifted by the block origin). The
+  superficial velocity U (reduced over ranks) lands on the Ergun curve to **0.0 %** and is
+  **bit-identical at np=1/2/4** — the distributed deposition + fold + solve reproduce the coupled
+  physics exactly.
 - P2G/G2P conservation + the gather/scatter adjoint identity: `core` `test_particle_grid` (host + CUDA).
+
+## Multi-rank coupling
+
+`CfdDem` runs distributed when the flow solver is decomposed (`flow.init_mpi(...)`, world size > 1):
+each rank couples its **local block**, the deposit grid map is shifted by the block origin (so
+particles in global coordinates land locally), and cross-rank + periodic ghost deposits (void
+fraction + drag reaction) fold onto their owner with the reverse halo (`exchange_field_add`) instead
+of the single-rank NumPy fold. `CfdDem.rebalance(gamma)` forms one weight field
+(`1 + gamma * particle_count`) and redistributes BOTH codes onto the same weighted ORB
+(`flow.rebalance_by_weights` + `dem.migrate_to_weights`). Give the flow + dem the same decomposition
+(matching grid dims / domain) before constructing `CfdDem`.
 
 Note: `dem.get_velocities()` (host copy getter) has a pre-existing failure after a *periodic* DEM
 step on CUDA (a Kokkos strided-subview-after-resize limitation, unrelated to the coupling); the

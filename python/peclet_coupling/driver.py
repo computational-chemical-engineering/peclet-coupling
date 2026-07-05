@@ -56,29 +56,69 @@ class CfdDem:
         self.drag_kind = {"stokes": DRAG_STOKES, "schiller_naumann": DRAG_SCHILLER_NAUMANN,
                           "ergun": DRAG_ERGUN, "di_felice": DRAG_DI_FELICE}[drag]
 
-        nx, ny, nz = flow.get_resolution()
+        nx, ny, nz = flow.get_resolution()  # LOCAL block dims under MPI
         self.g = flow.ghost_width()
         self.nx, self.ny, self.nz = nx, ny, nz
         self.ex, self.ey, self.ez = nx + 2 * self.g, ny + 2 * self.g, nz + 2 * self.g
-        # padded x-fastest scratch (F-order so ravel == flat x-fastest, matching the kernel),
-        # device- or host-resident to match the kernels.
+
+        # Multi-rank co-decomposition. When flow runs distributed each rank couples its LOCAL block:
+        # the deposit origin is shifted by the block origin (so particles in GLOBAL coordinates land
+        # in the local block) and cross-rank + periodic ghost deposits are folded with the reverse
+        # (add-reduce) halo instead of the NumPy periodic fold. Detected from the flow MPI module +
+        # world size; single-rank keeps the validated NumPy fold/fill path byte-for-byte.
+        self.mpi = False
+        try:
+            import peclet.flow as _fm
+            if getattr(_fm, "has_mpi", False):
+                from mpi4py import MPI
+                self.mpi = MPI.COMM_WORLD.Get_size() > 1
+        except Exception:
+            self.mpi = False
+        bo = flow.block_origin() if self.mpi else (0, 0, 0)
+        self._ox, self._oy, self._oz = bo[0] * self.h, bo[1] * self.h, bo[2] * self.h
+        gnx, gny, gnz = flow.global_resolution() if self.mpi else (nx, ny, nz)
+        self.gnx, self.gny, self.gnz = gnx, gny, gnz
+
+        # deposit / void-fraction buffers. Under MPI they are REGISTERED flow fields (so the halo can
+        # fold ghost deposits + fill ghosts); single-rank they are standalone padded scratch.
         xp = self.xp
-        self._solidvol = xp.zeros((self.ex, self.ey, self.ez), dtype=xp.float64, order="F")
-        self._eps = xp.ones((self.ex, self.ey, self.ez), dtype=xp.float64, order="F")
+        if self.mpi:
+            flow.add_field("solidvol")
+            flow.add_field("eps")
+        else:
+            self._solidvol = xp.zeros((self.ex, self.ey, self.ez), dtype=xp.float64, order="F")
+            self._eps = xp.ones((self.ex, self.ey, self.ez), dtype=xp.float64, order="F")
 
         if self.implicit_drag:
             flow.enable_drag()  # drag_beta on the momentum diagonal + force_* (beta*u_p) in the RHS
         else:
             flow.enable_cell_force()  # explicit reaction force in force_x/y/z
         self.dem.set_dt(self.dt_dem)
-        N = dem.num_particles()
+        N = dem.num_particles()  # this rank's OWNED count under MPI
         self._N = N
+        self._radius0 = float(radius) if np.isscalar(radius) else None  # scalar => resizable per-rank
         self._rad = (xp.full(N, radius, dtype=xp.float32) if np.isscalar(radius)
                      else xp.asarray(np.ascontiguousarray(radius, dtype=np.float32)))
         self._fdrag = xp.zeros((N, 3), dtype=xp.float32)
         self._ufluid = xp.zeros((N, 3), dtype=xp.float32)
         self.last_eps = None
         self.last_drag = None
+
+    # (self._ox,_oy,_oz) shifts the deposit so global particle coords land in the local block
+    # (== 0 single-rank). The grid map the coupling kernels take.
+    def _gm(self):
+        return (self._ox, self._oy, self._oz, self.h, self.ex, self.ey, self.ez, self.g)
+
+    # Size the per-particle scratch to the current owned count (constant single-rank / fixed bed;
+    # changes across a rebalance — needs a scalar radius to re-broadcast).
+    def _resize_particles(self, n):
+        if self._fdrag.shape[0] == n:
+            return
+        xp = self.xp
+        self._fdrag = xp.zeros((n, 3), dtype=xp.float32)
+        self._ufluid = xp.zeros((n, 3), dtype=xp.float32)
+        if self._radius0 is not None:
+            self._rad = xp.full(n, self._radius0, dtype=xp.float32)
 
     # Grid field as a device/host array over the SAME buffer (zero-copy): CuPy on a GPU build
     # (field_view returns a DLPack capsule), NumPy on a host build.
@@ -117,25 +157,38 @@ class CfdDem:
             f[_sl(a, n + g)] = f[_sl(a, g)]
 
     def update_void_fraction(self, pos):
-        self._solidvol[...] = 0.0
-        self._c.deposit_solid_volume(pos, self._rad, self._solidvol, 0.0, 0.0, 0.0, self.h,
-                                     self.ex, self.ey, self.ez, self.g)
-        self._fold(self._solidvol)
-        self._c.compute_void_fraction(self._solidvol, self._eps, self.inv_vcell, self.eps_min)
-        self._fill(self._eps)
+        # deposit target: a registered flow field under MPI (so the halo folds ghost deposits + fills
+        # ghosts), standalone scratch single-rank.
+        sv = self._fv("solidvol") if self.mpi else self._solidvol
+        ep = self._fv("eps") if self.mpi else self._eps
+        sv[...] = 0.0
+        self._c.deposit_solid_volume(pos, self._rad, sv, *self._gm())
+        if self.mpi:
+            self.flow.exchange_field_add("solidvol")  # fold cross-rank + periodic ghost deposits
+        else:
+            self._fold(sv)
+        self._c.compute_void_fraction(sv, ep, self.inv_vcell, self.eps_min)
+        if self.mpi:
+            self.flow.exchange_field("eps")  # fill the ghosts the gather stencil reads
+        else:
+            self._fill(ep)
+        self._eps = ep  # compute_forces reads this at the particles
 
     def compute_forces(self, pos, vel):
         for name in ("u", "v", "w"):
             self.flow.exchange_field(name)
         uf, vf, wf = (self._fv(n) for n in ("u", "v", "w"))
         fx, fy, fz = (self._fv(n) for n in ("force_x", "force_y", "force_z"))
-        gm = (0.0, 0.0, 0.0, self.h, self.ex, self.ey, self.ez, self.g)
+        gm = self._gm()
         if self.implicit_drag:
             db = self._fv("drag_beta")
             self._c.compute_drag_implicit(pos, vel, self._rad, uf, vf, wf, self._eps, self._fdrag,
                                           db, fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
                                           self.drag_kind)
-            self._fold(db)
+            if self.mpi:
+                self.flow.exchange_field_add("drag_beta")
+            else:
+                self._fold(db)
         else:
             self._c.compute_drag_feedback(pos, vel, self._rad, uf, vf, wf, self._eps, self._fdrag,
                                           fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
@@ -143,9 +196,12 @@ class CfdDem:
         self._c.interpolate_velocity(pos, uf, vf, wf, self._ufluid, *gm)
         sl = self._ufluid - vel  # slip the drag saw (host copy for inspection)
         self.last_slip = sl.get() if self.device else sl.copy()
-        self._fold(fx)
-        self._fold(fy)
-        self._fold(fz)
+        # fold the reaction feedback (force_*) onto owners: reverse halo under MPI, periodic wrap else.
+        for nm, f in (("force_x", fx), ("force_y", fy), ("force_z", fz)):
+            if self.mpi:
+                self.flow.exchange_field_add(nm)
+            else:
+                self._fold(f)
 
     def slip(self, pos, vel):
         """Interpolated fluid velocity minus particle velocity (N,3) — what the drag law sees.
@@ -155,6 +211,7 @@ class CfdDem:
 
     def step(self):
         pos, vel = self._particles()
+        self._resize_particles(pos.shape[0])
         self.update_void_fraction(pos)
         self.compute_forces(pos, vel)
         self.last_drag = (self._fdrag.get() if self.device else self._fdrag.copy())
