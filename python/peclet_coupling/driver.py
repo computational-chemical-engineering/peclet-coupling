@@ -78,6 +78,11 @@ class CfdDem:
         self._ox, self._oy, self._oz = bo[0] * self.h, bo[1] * self.h, bo[2] * self.h
         gnx, gny, gnz = flow.global_resolution() if self.mpi else (nx, ny, nz)
         self.gnx, self.gny, self.gnz = gnx, gny, gnz
+        # The CURRENT shared decomposition, as an x-fastest per-cell weight field. Uniform => the
+        # default equal-cell ORB flow's init_mpi built; rebalance() overwrites it. dem is migrated onto
+        # this each moving step so its ownership tracks flow's grid partition (the deposit stays
+        # in-block). None single-rank.
+        self._weights = np.ones(gnx * gny * gnz, dtype=np.float64) if self.mpi else None
 
         # deposit / void-fraction buffers. Under MPI they are REGISTERED flow fields (so the halo can
         # fold ghost deposits + fill ghosts); single-rank they are standalone padded scratch.
@@ -162,7 +167,8 @@ class CfdDem:
         sv = self._fv("solidvol") if self.mpi else self._solidvol
         ep = self._fv("eps") if self.mpi else self._eps
         sv[...] = 0.0
-        self._c.deposit_solid_volume(pos, self._rad, sv, *self._gm())
+        if pos.shape[0] > 0:  # a rank may own no particles under MPI; still run the halo collectives
+            self._c.deposit_solid_volume(pos, self._rad, sv, *self._gm())
         if self.mpi:
             self.flow.exchange_field_add("solidvol")  # fold cross-rank + periodic ghost deposits
         else:
@@ -180,20 +186,23 @@ class CfdDem:
         uf, vf, wf = (self._fv(n) for n in ("u", "v", "w"))
         fx, fy, fz = (self._fv(n) for n in ("force_x", "force_y", "force_z"))
         gm = self._gm()
-        if self.implicit_drag:
-            db = self._fv("drag_beta")
+        has_p = pos.shape[0] > 0  # a rank may own no particles under MPI (skip the per-particle
+        db = self._fv("drag_beta") if self.implicit_drag else None  # kernels, keep the collectives)
+        if has_p and self.implicit_drag:
             self._c.compute_drag_implicit(pos, vel, self._rad, uf, vf, wf, self._eps, self._fdrag,
                                           db, fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
                                           self.drag_kind)
+        elif has_p:
+            self._c.compute_drag_feedback(pos, vel, self._rad, uf, vf, wf, self._eps, self._fdrag,
+                                          fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
+                                          self.drag_kind)
+        if self.implicit_drag:
             if self.mpi:
                 self.flow.exchange_field_add("drag_beta")
             else:
                 self._fold(db)
-        else:
-            self._c.compute_drag_feedback(pos, vel, self._rad, uf, vf, wf, self._eps, self._fdrag,
-                                          fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
-                                          self.drag_kind)
-        self._c.interpolate_velocity(pos, uf, vf, wf, self._ufluid, *gm)
+        if has_p:
+            self._c.interpolate_velocity(pos, uf, vf, wf, self._ufluid, *gm)
         sl = self._ufluid - vel  # slip the drag saw (host copy for inspection)
         self.last_slip = sl.get() if self.device else sl.copy()
         # fold the reaction feedback (force_*) onto owners: reverse halo under MPI, periodic wrap else.
@@ -210,6 +219,11 @@ class CfdDem:
         return s.get() if self.device else s
 
     def step(self):
+        # Multi-rank moving particles: migrate ownership onto flow's grid partition BEFORE depositing,
+        # so every owned particle sits in this rank's block (the substeps only drift it by < a ghost
+        # band, corrected at the next step's migrate). Static bed / single-rank: no migration.
+        if self.mpi and self.move_particles:
+            self.dem.migrate_to_weights(self._weights)
         pos, vel = self._particles()
         self._resize_particles(pos.shape[0])
         self.update_void_fraction(pos)
@@ -219,8 +233,11 @@ class CfdDem:
         if self.move_particles:
             # dem's set_external_forces takes a host array; copy down on a GPU build.
             self.dem.set_external_forces(self._fdrag.get() if self.device else self._fdrag)
-            for _ in range(self.dem_substeps):
-                self.dem.step(self.dt_dem)
+            if self.mpi:
+                self.dem.step_mpi(self.dem_substeps)  # distributed substeps (halo exchange)
+            else:
+                for _ in range(self.dem_substeps):
+                    self.dem.step(self.dt_dem)
         self.flow.step()
 
     def rebalance(self, gamma=1.0):
@@ -229,11 +246,11 @@ class CfdDem:
         weighted ORB from it: the flow state via rebalance_by_weights (bit-exact migration + rebuild),
         the particles via migrate_to_weights. Because both build the SAME deterministic partition from
         the same array, they stay co-located. Call at a step boundary. No-op single-rank."""
+        if not self.mpi:
+            return
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
-        if comm.Get_size() == 1:
-            return
-        gnx, gny, gnz = self.nx, self.ny, self.nz
+        gnx, gny, gnz = self.gnx, self.gny, self.gnz  # GLOBAL grid
         # bin this rank's OWNED particles onto the global ORB grid, then sum across ranks.
         pos, _ = self._particles()
         p = pos.get() if self.device else np.asarray(pos)
@@ -246,5 +263,11 @@ class CfdDem:
         total = np.empty_like(counts)
         comm.Allreduce(counts, total, op=MPI.SUM)
         w = (1.0 + gamma * total).flatten(order="F")
+        self._weights = w  # dem is migrated onto this each moving step; flow redistributes now
         self.flow.rebalance_by_weights(w)
         self.dem.migrate_to_weights(w)
+        # flow's block moved -> refresh the deposit-origin shift + local extents.
+        bo = self.flow.block_origin()
+        self._ox, self._oy, self._oz = bo[0] * self.h, bo[1] * self.h, bo[2] * self.h
+        self.nx, self.ny, self.nz = self.flow.get_resolution()
+        self.ex, self.ey, self.ez = (self.nx + 2 * self.g, self.ny + 2 * self.g, self.nz + 2 * self.g)

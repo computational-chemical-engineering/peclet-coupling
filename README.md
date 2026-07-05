@@ -76,6 +76,21 @@ of the single-rank NumPy fold. `CfdDem.rebalance(gamma)` forms one weight field
 (`flow.rebalance_by_weights` + `dem.migrate_to_weights`). Give the flow + dem the same decomposition
 (matching grid dims / domain) before constructing `CfdDem`.
 
+**Moving particles** (`move_particles=True`): each fluid step `CfdDem` first migrates dem onto flow's
+grid partition (`dem.migrate_to_weights`) so every owned particle sits in its rank's block, then runs
+the DISTRIBUTED DEM substeps (`dem.step_mpi`, requires `dem.init_mpi` + `dem.enable_mpi_step`). A rank
+that momentarily owns no particles still runs the halo collectives (the per-particle kernels are
+skipped). Validated `test_mpi_fixed_bed_ergun.py` (static, bit-identical np 1/2/4) and
+`test_mpi_moving_suspension.py` (drifting cloud crossing rank boundaries: the distributed
+migrate + step + deposit-fold + gather reproduce single-rank to ~2e-7, np 1/2).
+
+Two known limitations of the underlying dem distributed step (not the coupling — every distributed
+coupling op is bit-identical to single-rank in isolation): (1) a rank with **zero owned particles but
+an incoming ghost** deadlocks the dem step (affects very dilute clouds / np=4 of the moving test);
+(2) a *sustained* dilute settling suspension in a triply-periodic box with no buoyancy is an ill-posed,
+numerically unstable configuration — at np>1 the flow solve's reduction-floor non-determinism seeds
+that instability. Well-posed cases (bounded / driven flow, denser beds) are unaffected.
+
 Note: `dem.get_velocities()` (host copy getter) has a pre-existing failure after a *periodic* DEM
 step on CUDA (a Kokkos strided-subview-after-resize limitation, unrelated to the coupling); the
 driver uses the zero-copy device *views* throughout and exposes `last_slip` for inspection.
