@@ -19,7 +19,38 @@
 
 namespace peclet::coupling {
 
-enum DragKind { STOKES = 0, SCHILLER_NAUMANN = 1, ERGUN = 2, DI_FELICE = 3 };
+enum DragKind {
+  STOKES = 0,
+  SCHILLER_NAUMANN = 1,
+  ERGUN = 2,
+  DI_FELICE = 3,
+  WEN_YU = 4,
+  GIDASPOW = 5
+};
+
+// Wen & Yu interphase drag coefficient per particle, F = beta_over_n * vrel. The dilute branch of
+// Gidaspow: beta = (3/4) Cd (eps(1-eps)rhof|v|/d) eps^-2.65 with the single-sphere Cd(Re_p);
+// beta_over_n = beta*Vp/(1-eps) = (3/4) Cd rhof|v| Vp eps^-1.65 / d. Reduces to the standard
+// single-sphere drag as eps->1 and to voidage-corrected Stokes (6 pi mu r eps^-2.65) as Re_p->0.
+KOKKOS_INLINE_FUNCTION double wenYuBetaOverN(double vmag, double d, double mu, double rhof,
+                                             double eps, double Vp) {
+  const double Rep = eps * rhof * d * vmag / mu;  // voidage particle Reynolds number
+  double CdV;                                      // Cd * |v| (kept finite as |v| -> 0)
+  if (Rep < 1000.0)
+    CdV = 24.0 * mu / (eps * rhof * d) * (1.0 + 0.15 * Kokkos::pow(Rep > 1e-30 ? Rep : 1e-30, 0.687));
+  else
+    CdV = 0.44 * vmag;
+  return 0.75 * CdV * rhof * Vp * Kokkos::pow(eps, -1.65) / d;
+}
+
+// Ergun (packed-bed) interphase coefficient per particle, F = beta_over_n * vrel. The dense branch of
+// Gidaspow: beta = 150(1-eps)^2 mu/(eps d^2) + 1.75(1-eps)rhof|v|/d; beta_over_n = beta*Vp/(1-eps).
+KOKKOS_INLINE_FUNCTION double ergunBetaOverN(double vmag, double d, double mu, double rhof,
+                                             double eps, double Vp) {
+  const double om = 1.0 - eps;
+  const double beta = 150.0 * om * om * mu / (eps * d * d) + 1.75 * om * rhof * vmag / d;
+  return beta * Vp / (om > 1e-9 ? om : 1e-9);
+}
 
 // vrel = u_fluid - u_particle (3 components in/out). Returns F = drag force ON the particle.
 KOKKOS_INLINE_FUNCTION void dragForce(int kind, double vx, double vy, double vz, double r, double mu,
@@ -42,7 +73,13 @@ KOKKOS_INLINE_FUNCTION void dragForce(int kind, double vx, double vy, double vz,
     const double lRe = Kokkos::log10(Re > 1e-9 ? Re : 1e-9);
     const double chi = 3.7 - 0.65 * Kokkos::exp(-0.5 * (1.5 - lRe) * (1.5 - lRe));
     beta_over_n = 6.0 * M_PI * mu * r * corr * Kokkos::pow(eps, -(chi - 1.0));
-  } else {  // ERGUN (packed bed): beta*V_p/(1-eps) with the Ergun interphase coefficient
+  } else if (kind == WEN_YU) {
+    beta_over_n = wenYuBetaOverN(vmag, d, mu, rhof, eps, Vp);
+  } else if (kind == GIDASPOW) {
+    // Gidaspow (1994): Ergun for the dense regime, Wen & Yu for the dilute, switched at eps = 0.8.
+    beta_over_n = (eps < 0.8) ? ergunBetaOverN(vmag, d, mu, rhof, eps, Vp)
+                              : wenYuBetaOverN(vmag, d, mu, rhof, eps, Vp);
+  } else {  // ERGUN (packed bed): beta*V_p/(1-eps) with the eps^3-superficial Ergun coefficient
     const double om = 1.0 - eps;         // solid fraction
     const double e3 = eps * eps * eps;   // eps^3
     const double beta = 150.0 * om * om * mu / (e3 * d * d) + 1.75 * om * rhof * vmag / (e3 * d);

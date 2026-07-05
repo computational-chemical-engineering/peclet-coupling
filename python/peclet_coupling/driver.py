@@ -27,7 +27,8 @@ class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
                  dem_substeps=20, eps_min=0.2, periodic=(True, True, True), h=1.0,
                  move_particles=True, implicit_drag=True):
-        from . import _coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE
+        from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
+                       DRAG_WEN_YU, DRAG_GIDASPOW)
         self._c = _coupling
         self.flow = flow
         self.dem = dem
@@ -54,7 +55,8 @@ class CfdDem:
         self.inv_vcell = 1.0 / (self.h ** 3)
         self.periodic = tuple(bool(p) for p in periodic)
         self.drag_kind = {"stokes": DRAG_STOKES, "schiller_naumann": DRAG_SCHILLER_NAUMANN,
-                          "ergun": DRAG_ERGUN, "di_felice": DRAG_DI_FELICE}[drag]
+                          "ergun": DRAG_ERGUN, "di_felice": DRAG_DI_FELICE,
+                          "wen_yu": DRAG_WEN_YU, "gidaspow": DRAG_GIDASPOW}[drag]
 
         nx, ny, nz = flow.get_resolution()  # LOCAL block dims under MPI
         self.g = flow.ghost_width()
