@@ -129,9 +129,8 @@ def build(P, comm=None):
     pos, npart = initial_packing(P, rp)
     cap = int(2.2 * npart) + 256
     d = peclet.dem.Simulation(cap)
-    d.initialize(shape_type=1, radius=1.0)     # 1 = sphere (canonical); scaled to rp below
-    d.set_global_scale(rp)                     # effective radius = rp; ghost band ~ rp (not the
-    d.set_domain((0, 0, 0), (P.NX, P.NY, P.NZ))  # default 1.0, which is 10x these sub-cell grains)
+    d.initialize(shape_type=1, radius=rp)      # 1 = sphere, radius rp directly (SI-style: the DEM
+    d.set_domain((0, 0, 0), (P.NX, P.NY, P.NZ))  # sizes its halo band from the actual grain radius)
     d.enable_periodicity(False, False, False)
     d.set_gravity(0.0, 0.0, -P.g)
     d.set_material_params(P.e_pp, 0.0, P.mu_pp)

@@ -108,8 +108,8 @@ class CfdDem:
                      else xp.asarray(np.ascontiguousarray(radius, dtype=np.float32)))
         self._fdrag = xp.zeros((N, 3), dtype=xp.float32)
         self._ufluid = xp.zeros((N, 3), dtype=xp.float32)
+        self._last_slip = None
         self.last_eps = None
-        self.last_drag = None
 
     # (self._ox,_oy,_oz) shifts the deposit so global particle coords land in the local block
     # (== 0 single-rank). The grid map the coupling kernels take.
@@ -205,8 +205,7 @@ class CfdDem:
                 self._fold(db)
         if has_p:
             self._c.interpolate_velocity(pos, uf, vf, wf, self._ufluid, *gm)
-        sl = self._ufluid - vel  # slip the drag saw (host copy for inspection)
-        self.last_slip = sl.get() if self.device else sl.copy()
+        self._last_slip = self._ufluid - vel  # slip the drag saw; kept DEVICE-side (lazy .get on access)
         # fold the reaction feedback (force_*) onto owners: reverse halo under MPI, periodic wrap else.
         for nm, f in (("force_x", fx), ("force_y", fy), ("force_z", fz)):
             if self.mpi:
@@ -220,6 +219,17 @@ class CfdDem:
         s = self._ufluid - self.xp.asarray(vel)
         return s.get() if self.device else s
 
+    # Diagnostics as HOST arrays, converted lazily on access (no per-step device->host copy in the hot
+    # loop). Reflect the most recent step; copy them if you keep them across steps.
+    @property
+    def last_slip(self):
+        s = getattr(self, "_last_slip", None)
+        return None if s is None else (s.get() if self.device else np.asarray(s))
+
+    @property
+    def last_drag(self):
+        return self._fdrag.get() if self.device else np.asarray(self._fdrag)
+
     def step(self):
         # Multi-rank moving particles: migrate ownership onto flow's grid partition BEFORE depositing,
         # so every owned particle sits in this rank's block (the substeps only drift it by < a ghost
@@ -230,11 +240,13 @@ class CfdDem:
         self._resize_particles(pos.shape[0])
         self.update_void_fraction(pos)
         self.compute_forces(pos, vel)
-        self.last_drag = (self._fdrag.get() if self.device else self._fdrag.copy())
         self.last_eps = self._eps
         if self.move_particles:
-            # dem's set_external_forces takes a host array; copy down on a GPU build.
-            self.dem.set_external_forces(self._fdrag.get() if self.device else self._fdrag)
+            # Write the drag straight into dem's external-force buffer ON DEVICE (zero-copy view) — no
+            # host round-trip, so the coupled step stays device-resident and the DEM remains the cost.
+            efv = self.dem.get_external_forces_view()
+            ext = self.xp.from_dlpack(efv) if self.device else np.asarray(efv)
+            ext[...] = self._fdrag
             if self.mpi:
                 self.dem.step_mpi(self.dem_substeps)  # distributed substeps (halo exchange)
             else:
