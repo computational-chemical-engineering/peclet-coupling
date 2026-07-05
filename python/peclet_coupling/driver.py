@@ -165,3 +165,29 @@ class CfdDem:
             for _ in range(self.dem_substeps):
                 self.dem.step(self.dt_dem)
         self.flow.step()
+
+    def rebalance(self, gamma=1.0):
+        """Dynamic co-rebalancing (multi-rank only). Build ONE weight field over the global grid --
+        fluid work (1 per cell) + gamma * particle count -- and redistribute BOTH codes onto the same
+        weighted ORB from it: the flow state via rebalance_by_weights (bit-exact migration + rebuild),
+        the particles via migrate_to_weights. Because both build the SAME deterministic partition from
+        the same array, they stay co-located. Call at a step boundary. No-op single-rank."""
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        if comm.Get_size() == 1:
+            return
+        gnx, gny, gnz = self.nx, self.ny, self.nz
+        # bin this rank's OWNED particles onto the global ORB grid, then sum across ranks.
+        pos, _ = self._particles()
+        p = pos.get() if self.device else np.asarray(pos)
+        counts = np.zeros((gnx, gny, gnz), dtype=np.float64)
+        idx = np.floor(p / self.h).astype(np.int64)
+        np.clip(idx[:, 0], 0, gnx - 1, out=idx[:, 0])
+        np.clip(idx[:, 1], 0, gny - 1, out=idx[:, 1])
+        np.clip(idx[:, 2], 0, gnz - 1, out=idx[:, 2])
+        np.add.at(counts, (idx[:, 0], idx[:, 1], idx[:, 2]), 1.0)
+        total = np.empty_like(counts)
+        comm.Allreduce(counts, total, op=MPI.SUM)
+        w = (1.0 + gamma * total).flatten(order="F")
+        self.flow.rebalance_by_weights(w)
+        self.dem.migrate_to_weights(w)
