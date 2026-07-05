@@ -161,10 +161,16 @@ def build(P, comm=None):
     return s, d, cpl, npart
 
 
-def bed_height(d, comm=None):
-    """95th-percentile particle height (the top of the bed) -- rises when the bed fluidizes."""
+def _np(a):
+    """A NumPy view of a host or device (CuPy) array."""
+    return a.get() if hasattr(a, "get") and type(a).__module__.startswith("cupy") else np.asarray(a)
+
+
+def bed_height(cpl, comm=None):
+    """95th-percentile particle height (the top of the bed) -- rises when the bed fluidizes. Uses the
+    driver's device-safe position getter (dem's host copy getter breaks after a resizing step on CUDA)."""
     try:
-        z = np.asarray(d.get_positions())[:, 2]
+        z = _np(cpl._particles()[0])[:, 2]
         h = float(np.percentile(z, 95)) if z.size else 0.0
     except Exception:
         h = 0.0
@@ -179,17 +185,17 @@ def run(P=Params(), comm=None):
     if rank == 0:
         print(f"fluidized bed: {npart} grains, dp={P.dp} (cell/dp={1.0/P.dp:.0f}), R={P.R}, "
               f"U={P.U_in}, Gidaspow drag", flush=True)
-    h0 = bed_height(d, comm)
+    h0 = bed_height(cpl, comm)
     for i in range(P.steps):
         cpl.step()
         if i % 40 == 0 or i == P.steps - 1:
-            h = bed_height(d, comm)
+            h = bed_height(cpl, comm)
             eps = cpl.last_eps
-            emin = float(np.asarray(eps).min()) if eps is not None else 1.0
+            emin = float(_np(eps).min()) if eps is not None else 1.0
             if rank == 0:
                 print(f"  step {i:4d}: bed height={h:6.3f}  (h/h0={h/max(h0,1e-9):.2f})  "
                       f"min voidage={emin:.3f}", flush=True)
-    hf = bed_height(d, comm)
+    hf = bed_height(cpl, comm)
     if rank == 0:
         print(f"DONE: bed expanded h0={h0:.3f} -> hf={hf:.3f} (ratio {hf/max(h0,1e-9):.2f}); "
               f"{'FLUIDIZED' if hf > 1.05 * h0 else 'fixed bed (increase U_in)'}", flush=True)
