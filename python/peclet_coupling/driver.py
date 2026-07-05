@@ -26,7 +26,7 @@ def _sl(axis, idx):
 class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
                  dem_substeps=20, eps_min=0.2, periodic=(True, True, True), h=1.0,
-                 move_particles=True, implicit_drag=True):
+                 move_particles=True, implicit_drag=True, porous=False):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
                        DRAG_WEN_YU, DRAG_GIDASPOW)
         self._c = _coupling
@@ -51,6 +51,9 @@ class CfdDem:
         self.eps_min = float(eps_min)
         self.move_particles = bool(move_particles)  # False: fixed bed — skip DEM dynamics entirely
         self.implicit_drag = bool(implicit_drag)    # beta on the fluid diagonal (stable for stiff beds)
+        # Volume-averaged continuity d(eps)/dt+div(eps u)=0 (proper unresolved CFD-DEM). When off the
+        # fluid is solved incompressible (eps only in the drag) — cheaper, fine for dilute/steady beds.
+        self.porous = bool(porous)
         self.h = float(h)
         self.inv_vcell = 1.0 / (self.h ** 3)
         self.periodic = tuple(bool(p) for p in periodic)
@@ -89,12 +92,17 @@ class CfdDem:
         # deposit / void-fraction buffers. Under MPI they are REGISTERED flow fields (so the halo can
         # fold ghost deposits + fill ghosts); single-rank they are standalone padded scratch.
         xp = self.xp
-        if self.mpi:
+        # eps must live in a REGISTERED flow field when the halo needs it (MPI) or the flow reads it
+        # for the porous continuity; otherwise a standalone padded scratch is enough.
+        self._eps_is_field = self.mpi or self.porous
+        if self._eps_is_field:
             flow.add_field("solidvol")
             flow.add_field("eps")
         else:
             self._solidvol = xp.zeros((self.ex, self.ey, self.ez), dtype=xp.float64, order="F")
             self._eps = xp.ones((self.ex, self.ey, self.ez), dtype=xp.float64, order="F")
+        if self.porous:
+            flow.set_porous_continuity(True)  # projection enforces d(eps)/dt + div(eps u) = 0
 
         if self.implicit_drag:
             flow.enable_drag()  # drag_beta on the momentum diagonal + force_* (beta*u_p) in the RHS
@@ -166,8 +174,8 @@ class CfdDem:
     def update_void_fraction(self, pos):
         # deposit target: a registered flow field under MPI (so the halo folds ghost deposits + fills
         # ghosts), standalone scratch single-rank.
-        sv = self._fv("solidvol") if self.mpi else self._solidvol
-        ep = self._fv("eps") if self.mpi else self._eps
+        sv = self._fv("solidvol") if self._eps_is_field else self._solidvol
+        ep = self._fv("eps") if self._eps_is_field else self._eps
         sv[...] = 0.0
         if pos.shape[0] > 0:  # a rank may own no particles under MPI; still run the halo collectives
             self._c.deposit_solid_volume(pos, self._rad, sv, *self._gm())
@@ -239,6 +247,9 @@ class CfdDem:
         pos, vel = self._particles()
         self._resize_particles(pos.shape[0])
         self.update_void_fraction(pos)
+        if self.porous and not getattr(self, "_porous_primed", False):
+            self.flow.sync_porous_prev()  # first deposit: eps^n=eps^{n+1} so no spurious d(eps)/dt
+            self._porous_primed = True
         self.compute_forces(pos, vel)
         self.last_eps = self._eps
         if self.move_particles:

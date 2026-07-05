@@ -57,6 +57,7 @@ class Params:
     fluid_dt = 0.05
     dem_substeps = 20
     steps = 120
+    porous = True   # volume-averaged continuity d(eps)/dt+div(eps u)=0 (proper unresolved CFD-DEM)
 
 
 def cylinder_flow_sdf(P):
@@ -160,7 +161,7 @@ def build(P, comm=None):
 
     cpl = CfdDem(s, d, fluid_dt=P.fluid_dt, mu=P.mu_g, rho=P.rho_g, radius=rp, drag="gidaspow",
                  dem_substeps=P.dem_substeps, eps_min=0.3, periodic=(False, False, False),
-                 move_particles=True)
+                 move_particles=True, porous=P.porous)
     return s, d, cpl, npart
 
 
