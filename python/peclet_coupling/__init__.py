@@ -15,7 +15,7 @@ DRAG_DI_FELICE = 3
 DRAG_WEN_YU = 4
 DRAG_GIDASPOW = 5  # Ergun (dense) + Wen & Yu (dilute), switched at eps = 0.8
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["CfdDem", "_coupling", "DRAG_STOKES", "DRAG_SCHILLER_NAUMANN", "DRAG_ERGUN",
            "DRAG_DI_FELICE", "DRAG_WEN_YU", "DRAG_GIDASPOW"]
