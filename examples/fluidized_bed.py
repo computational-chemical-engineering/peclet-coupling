@@ -122,6 +122,10 @@ def build(P, comm=None):
     # the default 500-iteration cap just burns iterations with no further progress. Cap it: same bed,
     # ~10x faster flow step. (A tighter algebraic pressure solve for this geometry is a follow-up.)
     s.set_pressure_pcg(True, 50, 1e-6)
+    # Gas-phase convection: under domain BCs this is the fully-implicit FOU operator + explicit
+    # deferred-correction TVD (stable at large dt). Off, the momentum has no inertia at all and the
+    # fluidized gas velocities overshoot (~2x) in the freeboard.
+    s.set_advection(True)
     gsdf = cylinder_flow_sdf(P)
     if mpi:
         s.init_mpi(P.NX, P.NY, P.NZ)
