@@ -69,17 +69,20 @@ NB_MODULE(_coupling, m) {
 
   m.def(
       "deposit_solid_volume",
-      [](nb::ndarray<> pos, nb::ndarray<> rad, nb::ndarray<> solidvol, double ox, double oy,
-         double oz, double h, int ex, int ey, int ez, int g) {
+      [](nb::ndarray<> pos, nb::ndarray<> rad, nb::ndarray<> solidvol, nb::ndarray<> sdf, double ox,
+         double oy, double oz, double h, int ex, int ey, int ez, int g) {
         auto sv = flatField(solidvol, "deposit_solid_volume(solidvol)");
         Kokkos::deep_copy(sv, 0.0);
         peclet::coupling::depositSolidVolume((int)pos.shape(0), vec3(pos, "pos"), vecf(rad, "rad"),
-                                             sv, gmap(ox, oy, oz, h, ex, ey, ez, g));
+                                             sv, flatField(sdf, "sdf"),
+                                             gmap(ox, oy, oz, h, ex, ey, ez, g));
       },
-      nb::arg("pos"), nb::arg("rad"), nb::arg("solidvol"), nb::arg("ox"), nb::arg("oy"),
-      nb::arg("oz"), nb::arg("h"), nb::arg("ex"), nb::arg("ey"), nb::arg("ez"), nb::arg("g"),
-      "Scatter particle volumes (4/3 pi r^3) onto the flat padded `solidvol` buffer (zeroed here). "
-      "Fold the periodic ghosts before compute_void_fraction.");
+      nb::arg("pos"), nb::arg("rad"), nb::arg("solidvol"), nb::arg("sdf"), nb::arg("ox"),
+      nb::arg("oy"), nb::arg("oz"), nb::arg("h"), nb::arg("ex"), nb::arg("ey"), nb::arg("ez"),
+      nb::arg("g"),
+      "Scatter particle volumes (4/3 pi r^3) onto the flat padded `solidvol` buffer (zeroed here), "
+      "wall-aware: the hold-up is distributed over the fluid corners only (sdf>=0), reweighted to a "
+      "partition of unity so no volume leaks into the solid. Fold ghosts before compute_void_fraction.");
 
   m.def(
       "compute_void_fraction",
@@ -111,7 +114,7 @@ NB_MODULE(_coupling, m) {
   m.def(
       "compute_drag_feedback",
       [](nb::ndarray<> pos, nb::ndarray<> vel, nb::ndarray<> rad, nb::ndarray<> uf, nb::ndarray<> vf,
-         nb::ndarray<> wf, nb::ndarray<> eps, nb::ndarray<> fdrag, nb::ndarray<> fx,
+         nb::ndarray<> wf, nb::ndarray<> eps, nb::ndarray<> sdf, nb::ndarray<> fdrag, nb::ndarray<> fx,
          nb::ndarray<> fy, nb::ndarray<> fz, double ox, double oy, double oz, double h, int ex,
          int ey, int ez, int g, double mu, double rho, double inv_vcell, int drag_kind) {
         const GridMap mp = gmap(ox, oy, oz, h, ex, ey, ez, g);
@@ -122,12 +125,14 @@ NB_MODULE(_coupling, m) {
         peclet::coupling::computeDragFeedback(
             (int)pos.shape(0), vec3(pos, "pos"), vec3(vel, "vel"), vecf(rad, "rad"),
             flatField(uf, "uf"), flatField(vf, "vf"), flatField(wf, "wf"), flatField(eps, "eps"),
-            vec3(fdrag, "fdrag"), Fx, Fy, Fz, mp, mu, rho, inv_vcell, drag_kind);
+            flatField(sdf, "sdf"), vec3(fdrag, "fdrag"), Fx, Fy, Fz, mp, mu, rho, inv_vcell,
+            drag_kind);
       },
       nb::arg("pos"), nb::arg("vel"), nb::arg("rad"), nb::arg("uf"), nb::arg("vf"), nb::arg("wf"),
-      nb::arg("eps"), nb::arg("fdrag"), nb::arg("fx"), nb::arg("fy"), nb::arg("fz"), nb::arg("ox"),
-      nb::arg("oy"), nb::arg("oz"), nb::arg("h"), nb::arg("ex"), nb::arg("ey"), nb::arg("ez"),
-      nb::arg("g"), nb::arg("mu"), nb::arg("rho"), nb::arg("inv_vcell"), nb::arg("drag_kind"),
+      nb::arg("eps"), nb::arg("sdf"), nb::arg("fdrag"), nb::arg("fx"), nb::arg("fy"), nb::arg("fz"),
+      nb::arg("ox"), nb::arg("oy"), nb::arg("oz"), nb::arg("h"), nb::arg("ex"), nb::arg("ey"),
+      nb::arg("ez"), nb::arg("g"), nb::arg("mu"), nb::arg("rho"), nb::arg("inv_vcell"),
+      nb::arg("drag_kind"),
       "Gather (uf,vf,wf,eps) at each particle, evaluate the drag law (0 Stokes, 1 Schiller-Naumann, "
       "2 Ergun, 3 Di Felice), write the drag force to `fdrag` (N,3) and the reaction force density "
       "-F/Vcell onto (fx,fy,fz) (zeroed here). Momentum-conserving. EXPLICIT feedback — use "
@@ -136,10 +141,10 @@ NB_MODULE(_coupling, m) {
   m.def(
       "compute_drag_implicit",
       [](nb::ndarray<> pos, nb::ndarray<> vel, nb::ndarray<> rad, nb::ndarray<> uf, nb::ndarray<> vf,
-         nb::ndarray<> wf, nb::ndarray<> eps, nb::ndarray<> fdrag, nb::ndarray<> dragbeta,
-         nb::ndarray<> fx, nb::ndarray<> fy, nb::ndarray<> fz, double ox, double oy, double oz,
-         double h, int ex, int ey, int ez, int g, double mu, double rho, double inv_vcell,
-         int drag_kind) {
+         nb::ndarray<> wf, nb::ndarray<> eps, nb::ndarray<> sdf, nb::ndarray<> fdrag,
+         nb::ndarray<> dragbeta, nb::ndarray<> fx, nb::ndarray<> fy, nb::ndarray<> fz, double ox,
+         double oy, double oz, double h, int ex, int ey, int ez, int g, double mu, double rho,
+         double inv_vcell, int drag_kind) {
         const GridMap mp = gmap(ox, oy, oz, h, ex, ey, ez, g);
         auto Db = flatField(dragbeta, "drag_beta"), Fx = flatField(fx, "fx"),
              Fy = flatField(fy, "fy"), Fz = flatField(fz, "fz");
@@ -150,13 +155,14 @@ NB_MODULE(_coupling, m) {
         peclet::coupling::computeDragImplicit(
             (int)pos.shape(0), vec3(pos, "pos"), vec3(vel, "vel"), vecf(rad, "rad"),
             flatField(uf, "uf"), flatField(vf, "vf"), flatField(wf, "wf"), flatField(eps, "eps"),
-            vec3(fdrag, "fdrag"), Db, Fx, Fy, Fz, mp, mu, rho, inv_vcell, drag_kind);
+            flatField(sdf, "sdf"), vec3(fdrag, "fdrag"), Db, Fx, Fy, Fz, mp, mu, rho, inv_vcell,
+            drag_kind);
       },
       nb::arg("pos"), nb::arg("vel"), nb::arg("rad"), nb::arg("uf"), nb::arg("vf"), nb::arg("wf"),
-      nb::arg("eps"), nb::arg("fdrag"), nb::arg("drag_beta"), nb::arg("fx"), nb::arg("fy"),
-      nb::arg("fz"), nb::arg("ox"), nb::arg("oy"), nb::arg("oz"), nb::arg("h"), nb::arg("ex"),
-      nb::arg("ey"), nb::arg("ez"), nb::arg("g"), nb::arg("mu"), nb::arg("rho"), nb::arg("inv_vcell"),
-      nb::arg("drag_kind"),
+      nb::arg("eps"), nb::arg("sdf"), nb::arg("fdrag"), nb::arg("drag_beta"), nb::arg("fx"),
+      nb::arg("fy"), nb::arg("fz"), nb::arg("ox"), nb::arg("oy"), nb::arg("oz"), nb::arg("h"),
+      nb::arg("ex"), nb::arg("ey"), nb::arg("ez"), nb::arg("g"), nb::arg("mu"), nb::arg("rho"),
+      nb::arg("inv_vcell"), nb::arg("drag_kind"),
       "Implicit (semi-implicit) drag: writes `fdrag` (particle force) and deposits the linear-drag "
       "coefficient density onto `drag_beta` and the target beta*u_p onto (fx,fy,fz) (all zeroed "
       "here) for flow.enable_drag() to treat -beta*(u-u_p) implicitly. Stable for stiff beds.");

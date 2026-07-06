@@ -1,7 +1,13 @@
 # Bug: porous CFD-DEM crashes on CUDA — cross-module async race
 
-**Status:** open. Reproduces reliably on CUDA; harmless on OpenMP. Root cause understood,
-confirmed fix location known; the *proper* fix (below) is the open work.
+**Status: RESOLVED 2026-07-06 — the diagnosis below did NOT hold up.** There was no cross-module
+async race. The illegal-address crash was a DEM broadphase pair-buffer overflow (raw candidate count
+fed to the narrowphase as a loop bound; fixed by `findCollisionsGrow`, dem `d4d4093`). The subsequent
+porous NaN/blow-ups were two flow defects — the GraphAMG bottom solve diverging on domain-BC
+operators (force-enabled for porous+drag) and the drag diagonal never entering the momentum operator
+on the all-fluid domain-BC smoother path — see `flow/doc/porous_drag_projection_plan.md` §2 for the
+measured root causes and fixes. The "CUDA-only" appearance was the 50-iteration pressure cap
+truncating a diverging solve at backend-dependent points. Kept for the diagnostic history below.
 
 ## Symptom
 

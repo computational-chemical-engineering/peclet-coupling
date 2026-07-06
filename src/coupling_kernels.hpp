@@ -21,35 +21,77 @@ namespace peclet::coupling {
 
 using peclet::core::interp::GridMap;
 
-// Trilinear gather of one flat cell-centred field at a precomputed stencil (device helper).
-template <class FieldV>
-KOKKOS_INLINE_FUNCTION double gatherAt(const FieldV& f, long b, long sx, long sy, long sz, double wx,
-                                       double wy, double wz) {
-  auto F = [&](long o) { return (double)f(b + o); };
-  const double c00 = F(0) * (1 - wx) + F(sx) * wx;
-  const double c10 = F(sy) * (1 - wx) + F(sy + sx) * wx;
-  const double c01 = F(sz) * (1 - wx) + F(sz + sx) * wx;
-  const double c11 = F(sz + sy) * (1 - wx) + F(sz + sy + sx) * wx;
-  return (c00 * (1 - wy) + c10 * wy) * (1 - wz) + (c01 * (1 - wy) + c11 * wy) * wz;
+// A stencil corner is a FLUID cell iff the (cell-centred) SDF there is >= 0 (SDF < 0 inside the
+// solid, per docs/CONVENTIONS.md). With no geometry set, flow's sdf field is all-zero -> every corner
+// reads as fluid -> the wall-aware paths below reduce EXACTLY to plain trilinear (the periodic no-wall
+// case is byte-identical).
+template <class MaskV>
+KOKKOS_INLINE_FUNCTION bool cornerIsFluid(const MaskV& sdf, long o) {
+  return (double)sdf(o) >= 0.0;
 }
 
-// Scatter q onto the 8 stencil cells with the trilinear weights (atomic).
-template <class FieldV>
-KOKKOS_INLINE_FUNCTION void scatterAt(const FieldV& f, long b, long sx, long sy, long sz, double wx,
-                                      double wy, double wz, double q) {
-  using T = typename FieldV::value_type;
+// Wall-aware trilinear gather: interpolate a cell-centred field at the particle using ONLY the fluid
+// corners, reweighted to a partition of unity (a solid corner carries no data — its velocity is the
+// no-slip 0 and its eps is meaningless — so including it biases the interpolant). Reduces to plain
+// trilinear when all 8 corners are fluid. `fallback` is returned in the degenerate all-solid case
+// (particle centre inside the solid — should not happen for a physical bed).
+template <class FieldV, class MaskV>
+KOKKOS_INLINE_FUNCTION double gatherAtMasked(const FieldV& f, const MaskV& sdf, long b, long sx,
+                                             long sy, long sz, double wx, double wy, double wz,
+                                             double fallback) {
   const double w[2] = {1.0 - wx, wx}, wj[2] = {1.0 - wy, wy}, wk[2] = {1.0 - wz, wz};
+  double acc = 0.0, tot = 0.0;
   for (int dk = 0; dk < 2; ++dk)
     for (int dj = 0; dj < 2; ++dj)
-      for (int di = 0; di < 2; ++di)
-        Kokkos::atomic_add(&f(b + di * sx + dj * sy + dk * sz),
-                           (T)(q * w[di] * wj[dj] * wk[dk]));
+      for (int di = 0; di < 2; ++di) {
+        const long o = b + di * sx + dj * sy + dk * sz;
+        if (cornerIsFluid(sdf, o)) {
+          const double wgt = w[di] * wj[dj] * wk[dk];
+          acc += wgt * (double)f(o);
+          tot += wgt;
+        }
+      }
+  return (tot > 0.0) ? acc / tot : fallback;
+}
+
+// Wall-aware scatter of a conserved quantity q (solid volume, or a momentum-source density) onto the
+// 8 stencil corners: distribute ONLY over the fluid corners, reweighting them to a partition of unity
+// so a corner that falls inside the solid hands its share to the fluid corners instead of leaking q
+// into a cell the fluid solver never sees. sum of deposits == q exactly (mass/momentum conserved).
+// Reduces to plain trilinear when all 8 corners are fluid; degenerate all-solid dumps q at the base
+// corner (conserves q). The eps clamp downstream keeps the concentrated hold-up from driving eps < 0.
+template <class FieldV, class MaskV>
+KOKKOS_INLINE_FUNCTION void scatterAtMasked(const FieldV& f, const MaskV& sdf, long b, long sx,
+                                            long sy, long sz, double wx, double wy, double wz,
+                                            double q) {
+  using T = typename FieldV::value_type;
+  const double w[2] = {1.0 - wx, wx}, wj[2] = {1.0 - wy, wy}, wk[2] = {1.0 - wz, wz};
+  double tot = 0.0;
+  for (int dk = 0; dk < 2; ++dk)
+    for (int dj = 0; dj < 2; ++dj)
+      for (int di = 0; di < 2; ++di) {
+        const long o = b + di * sx + dj * sy + dk * sz;
+        if (cornerIsFluid(sdf, o))
+          tot += w[di] * wj[dj] * wk[dk];
+      }
+  if (tot <= 0.0) {  // particle centre buried in solid: conserve q by dumping it at the base corner
+    Kokkos::atomic_add(&f(b), (T)q);
+    return;
+  }
+  const double inv = 1.0 / tot;
+  for (int dk = 0; dk < 2; ++dk)
+    for (int dj = 0; dj < 2; ++dj)
+      for (int di = 0; di < 2; ++di) {
+        const long o = b + di * sx + dj * sy + dk * sz;
+        if (cornerIsFluid(sdf, o))
+          Kokkos::atomic_add(&f(o), (T)(q * w[di] * wj[dj] * wk[dk] * inv));
+      }
 }
 
 // Scatter each particle's volume (4/3 pi r^3) onto `solidvol` (pre-zeroed). Trilinear -> conserves
 // the total solid volume.
 template <class PosV, class RadV, class FieldV>
-void depositSolidVolume(int np, PosV pos, RadV rad, FieldV solidvol, GridMap m) {
+void depositSolidVolume(int np, PosV pos, RadV rad, FieldV solidvol, FieldV sdf, GridMap m) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
@@ -62,7 +104,9 @@ void depositSolidVolume(int np, PosV pos, RadV rad, FieldV solidvol, GridMap m) 
         const long sx = 1, sy = m.ex, sz = (long)m.ex * m.ey;
         const long b = (long)(i0 + m.g) + (long)(j0 + m.g) * sy + (long)(k0 + m.g) * sz;
         const double r = (double)rad(p);
-        scatterAt(solidvol, b, sx, sy, sz, wx, wy, wz, (4.0 / 3.0) * M_PI * r * r * r);
+        // Wall-aware: the solid hold-up goes only to fluid cells (partition of unity), so no particle
+        // volume leaks into the solid where the fluid solver would never account for it.
+        scatterAtMasked(solidvol, sdf, b, sx, sy, sz, wx, wy, wz, (4.0 / 3.0) * M_PI * r * r * r);
       });
 }
 
@@ -87,8 +131,8 @@ void voidFraction(FieldV solidvol, FieldV eps, double invVcell, double epsMin) {
 // (pre-zeroed) grid force-density fields fx,fy,fz. rho/mu physical; dragKind per drag.hpp.
 template <class PosV, class VelV, class RadV, class FieldV, class OutV>
 void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV vf, FieldV wf,
-                         FieldV eps, OutV fdrag, FieldV fx, FieldV fy, FieldV fz, GridMap m,
-                         double mu, double rhof, double invVcell, int dragKind) {
+                         FieldV eps, FieldV sdf, OutV fdrag, FieldV fx, FieldV fy, FieldV fz,
+                         GridMap m, double mu, double rhof, double invVcell, int dragKind) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
@@ -100,10 +144,12 @@ void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
         peclet::core::interp::detail::axisStencil((double)pos(p, 2), m.oz, m.idz, nz, k0, wz);
         const long sx = 1, sy = m.ex, sz = (long)m.ex * m.ey;
         const long b = (long)(i0 + m.g) + (long)(j0 + m.g) * sy + (long)(k0 + m.g) * sz;
-        const double uF = gatherAt(uf, b, sx, sy, sz, wx, wy, wz);
-        const double vF = gatherAt(vf, b, sx, sy, sz, wx, wy, wz);
-        const double wF = gatherAt(wf, b, sx, sy, sz, wx, wy, wz);
-        const double eP = gatherAt(eps, b, sx, sy, sz, wx, wy, wz);
+        // Wall-aware gather: interpolate from fluid corners only (a solid corner's velocity is the
+        // no-slip 0 and its eps is meaningless).
+        const double uF = gatherAtMasked(uf, sdf, b, sx, sy, sz, wx, wy, wz, 0.0);
+        const double vF = gatherAtMasked(vf, sdf, b, sx, sy, sz, wx, wy, wz, 0.0);
+        const double wF = gatherAtMasked(wf, sdf, b, sx, sy, sz, wx, wy, wz, 0.0);
+        const double eP = gatherAtMasked(eps, sdf, b, sx, sy, sz, wx, wy, wz, 1.0);
         const double vrx = uF - (double)vel(p, 0), vry = vF - (double)vel(p, 1),
                      vrz = wF - (double)vel(p, 2);
         double Fx, Fy, Fz;
@@ -111,9 +157,9 @@ void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
         fdrag(p, 0) = (typename OutV::value_type)Fx;
         fdrag(p, 1) = (typename OutV::value_type)Fy;
         fdrag(p, 2) = (typename OutV::value_type)Fz;
-        scatterAt(fx, b, sx, sy, sz, wx, wy, wz, -Fx * invVcell);
-        scatterAt(fy, b, sx, sy, sz, wx, wy, wz, -Fy * invVcell);
-        scatterAt(fz, b, sx, sy, sz, wx, wy, wz, -Fz * invVcell);
+        scatterAtMasked(fx, sdf, b, sx, sy, sz, wx, wy, wz, -Fx * invVcell);
+        scatterAtMasked(fy, sdf, b, sx, sy, sz, wx, wy, wz, -Fy * invVcell);
+        scatterAtMasked(fz, sdf, b, sx, sy, sz, wx, wy, wz, -Fz * invVcell);
       });
 }
 
@@ -125,8 +171,8 @@ void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
 // beta_over_n = |F_p| / |vrel|, recovered from the drag law by a unit-slip evaluation.
 template <class PosV, class VelV, class RadV, class FieldV, class OutV>
 void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV vf, FieldV wf,
-                         FieldV eps, OutV fdrag, FieldV dragBeta, FieldV fx, FieldV fy, FieldV fz,
-                         GridMap m, double mu, double rhof, double invVcell, int dragKind) {
+                         FieldV eps, FieldV sdf, OutV fdrag, FieldV dragBeta, FieldV fx, FieldV fy,
+                         FieldV fz, GridMap m, double mu, double rhof, double invVcell, int dragKind) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
@@ -138,10 +184,11 @@ void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
         peclet::core::interp::detail::axisStencil((double)pos(p, 2), m.oz, m.idz, nz, k0, wz);
         const long sx = 1, sy = m.ex, sz = (long)m.ex * m.ey;
         const long b = (long)(i0 + m.g) + (long)(j0 + m.g) * sy + (long)(k0 + m.g) * sz;
-        const double uF = gatherAt(uf, b, sx, sy, sz, wx, wy, wz);
-        const double vF = gatherAt(vf, b, sx, sy, sz, wx, wy, wz);
-        const double wF = gatherAt(wf, b, sx, sy, sz, wx, wy, wz);
-        const double eP = gatherAt(eps, b, sx, sy, sz, wx, wy, wz);
+        // Wall-aware gather: fluid corners only (partition of unity).
+        const double uF = gatherAtMasked(uf, sdf, b, sx, sy, sz, wx, wy, wz, 0.0);
+        const double vF = gatherAtMasked(vf, sdf, b, sx, sy, sz, wx, wy, wz, 0.0);
+        const double wF = gatherAtMasked(wf, sdf, b, sx, sy, sz, wx, wy, wz, 0.0);
+        const double eP = gatherAtMasked(eps, sdf, b, sx, sy, sz, wx, wy, wz, 1.0);
         const double upx = (double)vel(p, 0), upy = (double)vel(p, 1), upz = (double)vel(p, 2);
         const double vrx = uF - upx, vry = vF - upy, vrz = wF - upz;
         double Fx, Fy, Fz;
@@ -153,10 +200,10 @@ void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
         const double vmag = Kokkos::sqrt(vrx * vrx + vry * vry + vrz * vrz);
         const double Fmag = Kokkos::sqrt(Fx * Fx + Fy * Fy + Fz * Fz);
         const double bon = (vmag > 1e-30) ? Fmag / vmag : 0.0;
-        scatterAt(dragBeta, b, sx, sy, sz, wx, wy, wz, bon * invVcell);
-        scatterAt(fx, b, sx, sy, sz, wx, wy, wz, bon * upx * invVcell);
-        scatterAt(fy, b, sx, sy, sz, wx, wy, wz, bon * upy * invVcell);
-        scatterAt(fz, b, sx, sy, sz, wx, wy, wz, bon * upz * invVcell);
+        scatterAtMasked(dragBeta, sdf, b, sx, sy, sz, wx, wy, wz, bon * invVcell);
+        scatterAtMasked(fx, sdf, b, sx, sy, sz, wx, wy, wz, bon * upx * invVcell);
+        scatterAtMasked(fy, sdf, b, sx, sy, sz, wx, wy, wz, bon * upy * invVcell);
+        scatterAtMasked(fz, sdf, b, sx, sy, sz, wx, wy, wz, bon * upz * invVcell);
       });
 }
 

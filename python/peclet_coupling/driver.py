@@ -178,7 +178,10 @@ class CfdDem:
         ep = self._fv("eps") if self._eps_is_field else self._eps
         sv[...] = 0.0
         if pos.shape[0] > 0:  # a rank may own no particles under MPI; still run the halo collectives
-            self._c.deposit_solid_volume(pos, self._rad, sv, *self._gm())
+            # sdf (flow's cell-centred signed distance, <0 in solid) makes the deposit wall-aware:
+            # the hold-up goes only to fluid corners (partition of unity), never leaking into walls.
+            # With no geometry set sdf is all-zero -> every corner fluid -> plain trilinear deposit.
+            self._c.deposit_solid_volume(pos, self._rad, sv, self._fv("sdf"), *self._gm())
         if self.mpi:
             self.flow.exchange_field_add("solidvol")  # fold cross-rank + periodic ghost deposits
         else:
@@ -195,15 +198,16 @@ class CfdDem:
             self.flow.exchange_field(name)
         uf, vf, wf = (self._fv(n) for n in ("u", "v", "w"))
         fx, fy, fz = (self._fv(n) for n in ("force_x", "force_y", "force_z"))
+        sd = self._fv("sdf")  # wall mask: gather from / scatter to fluid corners only (partition of unity)
         gm = self._gm()
         has_p = pos.shape[0] > 0  # a rank may own no particles under MPI (skip the per-particle
         db = self._fv("drag_beta") if self.implicit_drag else None  # kernels, keep the collectives)
         if has_p and self.implicit_drag:
-            self._c.compute_drag_implicit(pos, vel, self._rad, uf, vf, wf, self._eps, self._fdrag,
+            self._c.compute_drag_implicit(pos, vel, self._rad, uf, vf, wf, self._eps, sd, self._fdrag,
                                           db, fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
                                           self.drag_kind)
         elif has_p:
-            self._c.compute_drag_feedback(pos, vel, self._rad, uf, vf, wf, self._eps, self._fdrag,
+            self._c.compute_drag_feedback(pos, vel, self._rad, uf, vf, wf, self._eps, sd, self._fdrag,
                                           fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
                                           self.drag_kind)
         if self.implicit_drag:
