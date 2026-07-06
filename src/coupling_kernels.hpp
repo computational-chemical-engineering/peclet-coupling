@@ -132,7 +132,8 @@ void voidFraction(FieldV solidvol, FieldV eps, double invVcell, double epsMin) {
 template <class PosV, class VelV, class RadV, class FieldV, class OutV>
 void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV vf, FieldV wf,
                          FieldV eps, FieldV sdf, OutV fdrag, FieldV fx, FieldV fy, FieldV fz,
-                         GridMap m, double mu, double rhof, double invVcell, int dragKind) {
+                         GridMap m, double mu, double rhof, double invVcell, int dragKind,
+                         bool modelB) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
@@ -154,6 +155,11 @@ void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
                      vrz = wF - (double)vel(p, 2);
         double Fx, Fy, Fz;
         dragForce(dragKind, vrx, vry, vrz, (double)rad(p), mu, rhof, eP, Fx, Fy, Fz);
+        if (modelB) {  // Model-B conversion beta_B = beta_A/eps: the fluid carries the FULL -grad(p)
+          Fx /= eP;    // (no -eps*grad p split), so the drag absorbs the particles' share. eps>=eps_min>0.
+          Fy /= eP;
+          Fz /= eP;
+        }
         fdrag(p, 0) = (typename OutV::value_type)Fx;
         fdrag(p, 1) = (typename OutV::value_type)Fy;
         fdrag(p, 2) = (typename OutV::value_type)Fz;
@@ -172,7 +178,8 @@ void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
 template <class PosV, class VelV, class RadV, class FieldV, class OutV>
 void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV vf, FieldV wf,
                          FieldV eps, FieldV sdf, OutV fdrag, FieldV dragBeta, FieldV fx, FieldV fy,
-                         FieldV fz, GridMap m, double mu, double rhof, double invVcell, int dragKind) {
+                         FieldV fz, GridMap m, double mu, double rhof, double invVcell, int dragKind,
+                         bool modelB) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
@@ -193,6 +200,11 @@ void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
         const double vrx = uF - upx, vry = vF - upy, vrz = wF - upz;
         double Fx, Fy, Fz;
         dragForce(dragKind, vrx, vry, vrz, (double)rad(p), mu, rhof, eP, Fx, Fy, Fz);
+        if (modelB) {  // Model-B conversion beta_B = beta_A/eps (fluid carries the full -grad p)
+          Fx /= eP;
+          Fy /= eP;
+          Fz /= eP;
+        }
         fdrag(p, 0) = (typename OutV::value_type)Fx;
         fdrag(p, 1) = (typename OutV::value_type)Fy;
         fdrag(p, 2) = (typename OutV::value_type)Fz;

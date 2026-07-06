@@ -14,11 +14,14 @@ round-tripped through the dem host API. **There is no C++ link between flow and 
 architecture (Python is the composition layer).
 
 Per fluid step (`CfdDem.step()`):
-1. **Void fraction** — scatter each particle's volume onto the grid (trilinear), periodic-fold the
-   ghost deposits, and `ε = clamp(1 − Vsolid/Vcell)`.
+1. **Void fraction** — scatter each particle's volume onto the grid (trilinear, **wall-aware**: near
+   an immersed solid the weights re-normalise over the fluid corners so no hold-up leaks into walls),
+   periodic-fold the ghost deposits, and `ε = clamp(1 − Vsolid/Vcell, eps_min, 1)`. The floor
+   `eps_min` defaults to 0.4 ≈ the random-close-packing voidage (the drag correlations are invalid,
+   and Ergun's `1/ε` powers explosive, below a physical packing).
 2. **Drag + feedback** — gather the fluid velocity and ε at each particle, evaluate the drag law
-   (Stokes / Schiller–Naumann / Ergun / Di Felice), write the drag force to the particles and deposit
-   the reaction onto the fluid momentum source.
+   (Stokes / Schiller–Naumann / Ergun / Di Felice / Wen & Yu / Gidaspow), write the drag force to the
+   particles and deposit the reaction onto the fluid momentum source.
 3. **Advance** — apply the drag to the particles and sub-step dem `dem_substeps` times (drag held
    constant), then advance the fluid one step (its RHS/operator now carry the feedback).
 
@@ -32,14 +35,22 @@ the fluid solve becomes `(ρ/dt + β)u = … + β u_p` — unconditionally stabl
 side stays explicit (fine for moving particles at moderate β). `implicit_drag=False` selects the
 explicit `−F/Vcell` feedback (dilute only).
 
-### Scope (v1)
+### Two fluid modes
 
-- **Model B** (drag-only): ε enters the drag correlation, not the fluid continuity/momentum
-  (no porous-media source terms). Valid dilute→moderate; the fixed-bed Ergun ΔP still closes via the
-  feedback.
-- Single rank. Periodic ghost fold/fill is done in NumPy on the padded buffers; the shared
-  decomposition + add-reduce halo for MPI is Phase 7.
-- Deposition uses `atomic_add` ⇒ results are tolerance-, not bit-exact.
+- **`porous=True` — volume-averaged (use this for beds).** The fluid solves the full volume-averaged
+  continuity `∂ε/∂t + ∇·(εu) = 0` (u = the **interstitial** gas velocity) with a SIMPLE-like eps- and
+  drag-weighted pressure projection — scheme, defaults and validation in
+  `flow/doc/porous_drag_scheme.md`. The pressure-force split is **Model B**: the gas carries the full
+  `−∇p`, the particles get drag + gravity, and the literature (Model-A) drag closures are converted
+  once inside the kernel, `β_B = β_A/ε` (`model_b` flag). Gas convection (implicit FOU + explicit
+  deferred-correction TVD) is enabled by the driver by default (`advection=True`).
+- **`porous=False` — dilute simplification.** The fluid stays incompressible (`div u = 0`); ε enters
+  the drag correlation only. Cheap and validated dilute→moderate. Note this is *not* "Model B":
+  Models A and B both use the full continuity and differ only in the `−ε∇p` vs `−∇p` split.
+
+Other scope notes: deposition uses `atomic_add` ⇒ results are tolerance-, not bit-exact; the `"ergun"`
+drag *kind* is the superficial-velocity form built for the incompressible mode — for porous beds use
+`"gidaspow"` (its dense branch is the classic interstitial Ergun form).
 
 ## Backends
 
@@ -57,6 +68,10 @@ Both cases pass identically on **host-openmp and CUDA (RTX 5080)**:
 - **`test_fixed_bed_ergun.py`** — uniform fixed bed (one particle per cell, ε = 0.6): the measured
   (f_drive, U) pair lands on the Ergun curve to **0.0 %** across the viscous, transition and inertial
   (Re_p ≈ 6) regimes — validating ε deposition, both Ergun terms, and the stable two-way feedback.
+- **`test_fixed_bed_ergun_porous.py`** — the same bed on the **volume-averaged (porous, Model B)**
+  path with the Gidaspow closure: (f_drive, U = ε·u_interstitial) lands on the Ergun curve to ~3 %
+  across all three regimes with no fitted factors — validating the eps-weighted projection, the
+  interstitial kinematics and the `β_B = β_A/ε` conversion together.
 - **`test_mpi_fixed_bed_ergun.py`** — the fixed-bed Ergun benchmark run **distributed** (flow
   `init_mpi`, each rank couples its ORB block; particle deposits fold across ranks + periodically via
   the reverse/add-reduce halo `exchange_field_add`, deposit origin shifted by the block origin). The
@@ -107,6 +122,7 @@ PYTHONPATH="$PWD/build:$PWD/../flow/build:$PWD/../dem/build" \
 
 ## Follow-ups
 
-Model-A porous terms (dense fluidization); kernel-width (vs trilinear) deposition smoothing; the
-Phase-7 MPI path (shared `BlockDecomposer` + `GridHalo::exchangeAdd` for ghost-layer deposits); CUDA
-validation of the zero-copy device path.
+Kernel-width (vs trilinear) deposition smoothing; the `ρε` volume-averaged inertia and
+`∇·[εμ(∇u+∇uᵀ)]` viscous forms in the gas momentum (accuracy — see
+`flow/doc/porous_drag_scheme.md` §6); a PEA-style implicit particle-drag substep for very stiff
+*moving* beds (`m_p/β < Δt` — the fluid side is already implicit).

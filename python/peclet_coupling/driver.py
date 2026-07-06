@@ -25,8 +25,8 @@ def _sl(axis, idx):
 
 class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
-                 dem_substeps=20, eps_min=0.2, periodic=(True, True, True), h=1.0,
-                 move_particles=True, implicit_drag=True, porous=False):
+                 dem_substeps=20, eps_min=0.4, periodic=(True, True, True), h=1.0,
+                 move_particles=True, implicit_drag=True, porous=False, advection=True):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
                        DRAG_WEN_YU, DRAG_GIDASPOW)
         self._c = _coupling
@@ -48,6 +48,10 @@ class CfdDem:
         self.fluid_dt = float(fluid_dt)
         self.dem_substeps = int(dem_substeps)
         self.dt_dem = self.fluid_dt / self.dem_substeps
+        # Void-fraction floor. Default 0.4 ~ the random-close-packing voidage: a physical packing
+        # cannot go below ~0.36, so deposits under the floor are local over-concentration of the
+        # trilinear/wall-aware scatter, and the Ergun-branch drag (beta ~ (1-eps)^2/eps...) explodes
+        # outside its validity range (a porous Model-B bed at eps_min=0.3 diverges; 0.4 is stable).
         self.eps_min = float(eps_min)
         self.move_particles = bool(move_particles)  # False: fixed bed — skip DEM dynamics entirely
         self.implicit_drag = bool(implicit_drag)    # beta on the fluid diagonal (stable for stiff beds)
@@ -103,6 +107,13 @@ class CfdDem:
             self._eps = xp.ones((self.ex, self.ey, self.ez), dtype=xp.float64, order="F")
         if self.porous:
             flow.set_porous_continuity(True)  # projection enforces d(eps)/dt + div(eps u) = 0
+        # Gas convection ON by default: fully-implicit FOU operator + explicit deferred-correction
+        # TVD (unconditionally stable at the large coupled dt on both the periodic and domain-BC
+        # paths). Without it the gas momentum has no inertia and freeboard velocities overshoot.
+        # advection=False restores a Stokes-like (drag+viscous+pressure only) gas.
+        if advection:
+            flow.set_advection(True)
+            flow.set_implicit_advection(True)
 
         if self.implicit_drag:
             flow.enable_drag()  # drag_beta on the momentum diagonal + force_* (beta*u_p) in the RHS
@@ -202,14 +213,17 @@ class CfdDem:
         gm = self._gm()
         has_p = pos.shape[0] > 0  # a rank may own no particles under MPI (skip the per-particle
         db = self._fv("drag_beta") if self.implicit_drag else None  # kernels, keep the collectives)
+        # porous (volume-averaged, Model B: the fluid carries the full -grad p) converts the drag
+        # closures beta_B = beta_A/eps inside the kernel (model_b flag); the incompressible mode
+        # keeps the literature Model-A forms unchanged.
         if has_p and self.implicit_drag:
             self._c.compute_drag_implicit(pos, vel, self._rad, uf, vf, wf, self._eps, sd, self._fdrag,
                                           db, fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
-                                          self.drag_kind)
+                                          self.drag_kind, self.porous)
         elif has_p:
             self._c.compute_drag_feedback(pos, vel, self._rad, uf, vf, wf, self._eps, sd, self._fdrag,
                                           fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
-                                          self.drag_kind)
+                                          self.drag_kind, self.porous)
         if self.implicit_drag:
             if self.mpi:
                 self.flow.exchange_field_add("drag_beta")
