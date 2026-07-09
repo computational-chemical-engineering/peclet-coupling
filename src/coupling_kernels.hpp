@@ -21,6 +21,24 @@ namespace peclet::coupling {
 
 using peclet::core::interp::GridMap;
 
+// Is the particle's trilinear stencil within coupling range of the local block? axisStencil CLAMPS
+// out-of-range particles into the boundary cell, so a grain that has escaped the domain (e.g. pushed
+// through a DEM wall by a violent contact solve and now in free fall below the distributor) would
+// keep depositing its full volume and drag target (with a runaway u_p) into the boundary row forever
+// — a guaranteed gas blow-up. A particle is coupled iff its stencil overlaps [-1, n] (one ghost
+// layer, whose deposits the driver folds back onto the boundary cell); anything further out is
+// dropped from the exchange (no deposit, zero drag — ballistic until the DEM recovers it).
+KOKKOS_INLINE_FUNCTION bool axisInRange(double p, double origin, double inv, int nInner) {
+  const double si = (p - origin) * inv - 0.5;  // continuous cell-centre coordinate
+  return si > -2.0 && si < (double)nInner + 1.0;
+}
+template <class GM>
+KOKKOS_INLINE_FUNCTION bool stencilInRange(double px, double py, double pz, const GM& m, int nx,
+                                           int ny, int nz) {
+  return axisInRange(px, m.ox, m.idx, nx) && axisInRange(py, m.oy, m.idy, ny) &&
+         axisInRange(pz, m.oz, m.idz, nz);
+}
+
 // A stencil corner is a FLUID cell iff the (cell-centred) SDF there is >= 0 (SDF < 0 inside the
 // solid, per docs/CONVENTIONS.md). With no geometry set, flow's sdf field is all-zero -> every corner
 // reads as fluid -> the wall-aware paths below reduce EXACTLY to plain trilinear (the periodic no-wall
@@ -96,6 +114,8 @@ void depositSolidVolume(int np, PosV pos, RadV rad, FieldV solidvol, FieldV sdf,
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
       "peclet::coupling::deposit_vol", Kokkos::RangePolicy<Exec>(0, np), KOKKOS_LAMBDA(int p) {
+        if (!stencilInRange((double)pos(p, 0), (double)pos(p, 1), (double)pos(p, 2), m, nx, ny, nz))
+          return;  // escaped the domain: no deposit (axisStencil would clamp it into the boundary)
         int i0, j0, k0;
         double wx, wy, wz;
         peclet::core::interp::detail::axisStencil((double)pos(p, 0), m.ox, m.idx, nx, i0, wx);
@@ -138,6 +158,10 @@ void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
       "peclet::coupling::drag_feedback", Kokkos::RangePolicy<Exec>(0, np), KOKKOS_LAMBDA(int p) {
+        if (!stencilInRange((double)pos(p, 0), (double)pos(p, 1), (double)pos(p, 2), m, nx, ny, nz)) {
+          fdrag(p, 0) = fdrag(p, 1) = fdrag(p, 2) = 0;  // escaped: ballistic, no exchange
+          return;
+        }
         int i0, j0, k0;
         double wx, wy, wz;
         peclet::core::interp::detail::axisStencil((double)pos(p, 0), m.ox, m.idx, nx, i0, wx);
@@ -184,6 +208,10 @@ void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
       "peclet::coupling::drag_implicit", Kokkos::RangePolicy<Exec>(0, np), KOKKOS_LAMBDA(int p) {
+        if (!stencilInRange((double)pos(p, 0), (double)pos(p, 1), (double)pos(p, 2), m, nx, ny, nz)) {
+          fdrag(p, 0) = fdrag(p, 1) = fdrag(p, 2) = 0;  // escaped: ballistic, no exchange
+          return;
+        }
         int i0, j0, k0;
         double wx, wy, wz;
         peclet::core::interp::detail::axisStencil((double)pos(p, 0), m.ox, m.idx, nx, i0, wx);

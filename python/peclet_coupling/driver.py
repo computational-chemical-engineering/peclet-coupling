@@ -163,24 +163,68 @@ class CfdDem:
             vel = np.ascontiguousarray(self.dem.get_velocities(), dtype=np.float32)
         return pos, vel
 
-    # --- periodic ghost handling on a padded (ex,ey,ez) buffer -------------------------------
-    def _fold(self, f):  # deposits that landed one cell into the ghost wrap back to the inner edge
+    # --- ghost handling on a padded (ex,ey,ez) buffer ----------------------------------------
+    def _fold(self, f):
+        """Fold ghost-layer deposits back onto owned cells. Periodic axis: wrap to the opposite
+        inner edge. Non-periodic axis: fold into the SAME-side boundary cell — a grain resting on
+        the distributor scatters part of its volume (and drag beta / feedback) one layer below
+        z=0; dropping it would lose hold-up exactly where the bed is densest and leave the
+        deposit's leakage in ghosts the fluid reads."""
         g = self.g
         for a, (n, per) in enumerate(zip((self.nx, self.ny, self.nz), self.periodic)):
-            if not per:
-                continue
-            f[_sl(a, n + g - 1)] += f[_sl(a, g - 1)]
-            f[_sl(a, g)] += f[_sl(a, n + g)]
+            if per:
+                f[_sl(a, n + g - 1)] += f[_sl(a, g - 1)]
+                f[_sl(a, g)] += f[_sl(a, n + g)]
+            else:
+                f[_sl(a, g)] += f[_sl(a, g - 1)]
+                f[_sl(a, n + g - 1)] += f[_sl(a, n + g)]
             f[_sl(a, g - 1)] = 0.0
             f[_sl(a, n + g)] = 0.0
 
-    def _fill(self, f):  # fill the one ghost layer the gather stencil reads (periodic wrap)
+    def _fold_domain(self, f):
+        """MPI: same-side fold of the non-periodic GLOBAL-domain-boundary ghosts of the local
+        block (the reverse halo never touches them). Call BEFORE exchange_field_add."""
+        g = self.g
+        lo = (int(self._ox / self.h), int(self._oy / self.h), int(self._oz / self.h))
+        dims = (self.nx, self.ny, self.nz)
+        gdims = (self.gnx, self.gny, self.gnz)
+        for a in range(3):
+            if self.periodic[a]:
+                continue
+            if lo[a] == 0:
+                f[_sl(a, g)] += f[_sl(a, g - 1)]
+                f[_sl(a, g - 1)] = 0.0
+            if lo[a] + dims[a] == gdims[a]:
+                f[_sl(a, dims[a] + g - 1)] += f[_sl(a, dims[a] + g)]
+                f[_sl(a, dims[a] + g)] = 0.0
+
+    def _fill(self, f):
+        """Fill the one ghost layer the gather stencil reads: periodic wrap, or zero-gradient at a
+        non-periodic domain face (a grain near the floor must see the LOCAL bed eps/velocity, not
+        the deposit's stale ghost values)."""
         g = self.g
         for a, (n, per) in enumerate(zip((self.nx, self.ny, self.nz), self.periodic)):
-            if not per:
+            if per:
+                f[_sl(a, g - 1)] = f[_sl(a, n + g - 1)]
+                f[_sl(a, n + g)] = f[_sl(a, g)]
+            else:
+                f[_sl(a, g - 1)] = f[_sl(a, g)]
+                f[_sl(a, n + g)] = f[_sl(a, n + g - 1)]
+
+    def _fill_domain(self, f):
+        """MPI: zero-gradient fill of the non-periodic global-domain-boundary ghosts (the halo
+        fill never touches them). Call AFTER exchange_field."""
+        g = self.g
+        lo = (int(self._ox / self.h), int(self._oy / self.h), int(self._oz / self.h))
+        dims = (self.nx, self.ny, self.nz)
+        gdims = (self.gnx, self.gny, self.gnz)
+        for a in range(3):
+            if self.periodic[a]:
                 continue
-            f[_sl(a, g - 1)] = f[_sl(a, n + g - 1)]
-            f[_sl(a, n + g)] = f[_sl(a, g)]
+            if lo[a] == 0:
+                f[_sl(a, g - 1)] = f[_sl(a, g)]
+            if lo[a] + dims[a] == gdims[a]:
+                f[_sl(a, dims[a] + g)] = f[_sl(a, dims[a] + g - 1)]
 
     def update_void_fraction(self, pos):
         # deposit target: a registered flow field under MPI (so the halo folds ghost deposits + fills
@@ -194,12 +238,14 @@ class CfdDem:
             # With no geometry set sdf is all-zero -> every corner fluid -> plain trilinear deposit.
             self._c.deposit_solid_volume(pos, self._rad, sv, self._fv("sdf"), *self._gm())
         if self.mpi:
+            self._fold_domain(sv)  # non-periodic domain-boundary ghosts (halo never folds them)
             self.flow.exchange_field_add("solidvol")  # fold cross-rank + periodic ghost deposits
         else:
             self._fold(sv)
         self._c.compute_void_fraction(sv, ep, self.inv_vcell, self.eps_min)
         if self.mpi:
             self.flow.exchange_field("eps")  # fill the ghosts the gather stencil reads
+            self._fill_domain(ep)
         else:
             self._fill(ep)
         self._eps = ep  # compute_forces reads this at the particles
@@ -226,6 +272,7 @@ class CfdDem:
                                           self.drag_kind, self.porous)
         if self.implicit_drag:
             if self.mpi:
+                self._fold_domain(db)
                 self.flow.exchange_field_add("drag_beta")
             else:
                 self._fold(db)
@@ -235,6 +282,7 @@ class CfdDem:
         # fold the reaction feedback (force_*) onto owners: reverse halo under MPI, periodic wrap else.
         for nm, f in (("force_x", fx), ("force_y", fy), ("force_z", fz)):
             if self.mpi:
+                self._fold_domain(f)
                 self.flow.exchange_field_add(nm)
             else:
                 self._fold(f)

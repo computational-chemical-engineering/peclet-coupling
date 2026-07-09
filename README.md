@@ -16,9 +16,15 @@ architecture (Python is the composition layer).
 Per fluid step (`CfdDem.step()`):
 1. **Void fraction** — scatter each particle's volume onto the grid (trilinear, **wall-aware**: near
    an immersed solid the weights re-normalise over the fluid corners so no hold-up leaks into walls),
-   periodic-fold the ghost deposits, and `ε = clamp(1 − Vsolid/Vcell, eps_min, 1)`. The floor
-   `eps_min` defaults to 0.4 ≈ the random-close-packing voidage (the drag correlations are invalid,
-   and Ergun's `1/ε` powers explosive, below a physical packing).
+   fold the ghost deposits (periodic wrap on periodic axes; **same-side fold onto the boundary cell
+   at a non-periodic domain face** — a grain resting on the distributor scatters part of its volume
+   below z=0, and that hold-up belongs to the bottom cell, not to a ghost the fluid never owns), and
+   `ε = clamp(1 − Vsolid/Vcell, eps_min, 1)`. The floor `eps_min` defaults to 0.4 ≈ the
+   random-close-packing voidage (the drag correlations are invalid, and Ergun's `1/ε` powers
+   explosive, below a physical packing). A particle whose trilinear stencil falls **outside the
+   domain by more than one ghost layer** (e.g. pushed through a DEM wall by a violent contact solve)
+   is dropped from the exchange entirely — no deposit, zero drag — so a runaway escapee can never
+   feed a diverging `β·u_p` source into the boundary row.
 2. **Drag + feedback** — gather the fluid velocity and ε at each particle, evaluate the drag law
    (Stokes / Schiller–Naumann / Ergun / Di Felice / Wen & Yu / Gidaspow), write the drag force to the
    particles and deposit the reaction onto the fluid momentum source.
