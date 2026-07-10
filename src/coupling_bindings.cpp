@@ -150,7 +150,8 @@ NB_MODULE(_coupling, m) {
       nb::arg("ez"), nb::arg("g"), nb::arg("mu"), nb::arg("rho"), nb::arg("inv_vcell"),
       nb::arg("drag_kind"), nb::arg("model_b") = false,
       "Gather (uf,vf,wf,eps) at each particle, evaluate the drag law (0 Stokes, 1 Schiller-Naumann, "
-      "2 Ergun, 3 Di Felice), write the drag force to `fdrag` (N,3) and the reaction force density "
+      "2 Ergun, 3 Di Felice, 4 Wen-Yu, 5 Gidaspow, 6 Beetstra/BVK), write the drag force to `fdrag` "
+      "(N,3) and the reaction force density "
       "-F/Vcell onto (fx,fy,fz) (zeroed here). Momentum-conserving. EXPLICIT feedback — use "
       "compute_drag_implicit for stiff (dense-bed) drag.");
 

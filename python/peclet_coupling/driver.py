@@ -28,7 +28,7 @@ class CfdDem:
                  dem_substeps=20, eps_min=0.05, smooth_width=0.0, periodic=(True, True, True), h=1.0,
                  move_particles=True, implicit_drag=True, porous=False, advection=True):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
-                       DRAG_WEN_YU, DRAG_GIDASPOW)
+                       DRAG_WEN_YU, DRAG_GIDASPOW, DRAG_BEETSTRA)
         self._c = _coupling
         self.flow = flow
         self.dem = dem
@@ -73,7 +73,8 @@ class CfdDem:
         self.periodic = tuple(bool(p) for p in periodic)
         self.drag_kind = {"stokes": DRAG_STOKES, "schiller_naumann": DRAG_SCHILLER_NAUMANN,
                           "ergun": DRAG_ERGUN, "di_felice": DRAG_DI_FELICE,
-                          "wen_yu": DRAG_WEN_YU, "gidaspow": DRAG_GIDASPOW}[drag]
+                          "wen_yu": DRAG_WEN_YU, "gidaspow": DRAG_GIDASPOW,
+                          "beetstra": DRAG_BEETSTRA, "bvk": DRAG_BEETSTRA}[drag]
 
         nx, ny, nz = flow.get_resolution()  # LOCAL block dims under MPI
         self.g = flow.ghost_width()

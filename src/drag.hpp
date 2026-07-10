@@ -25,7 +25,8 @@ enum DragKind {
   ERGUN = 2,
   DI_FELICE = 3,
   WEN_YU = 4,
-  GIDASPOW = 5
+  GIDASPOW = 5,
+  BEETSTRA = 6  // Beetstra-van der Hoef-Kuipers DNS drag (MFIX's "BVK2")
 };
 
 // Wen & Yu interphase drag coefficient per particle, F = beta_over_n * vrel. The dilute branch of
@@ -75,6 +76,22 @@ KOKKOS_INLINE_FUNCTION void dragForce(int kind, double vx, double vy, double vz,
     beta_over_n = 6.0 * M_PI * mu * r * corr * Kokkos::pow(eps, -(chi - 1.0));
   } else if (kind == WEN_YU) {
     beta_over_n = wenYuBetaOverN(vmag, d, mu, rhof, eps, Vp);
+  } else if (kind == BEETSTRA) {
+    // Beetstra, van der Hoef & Kuipers (AIChE J 53, 489, 2007) monodisperse DNS drag — the "BVK2"
+    // law of MFIX(-Exa). Dimensionless drag F(phi,Re) normalized by the Stokes force 3 pi mu d u on
+    // an isolated sphere; per-particle F = 3 pi mu d eps F(phi,Re) vrel (the extra eps is the
+    // MFIX/TFM interstitial-slip convention: beta = 18 mu eps phi F / d^2, beta_over_n = beta Vp/phi).
+    // Re is the voidage (superficial) particle Reynolds number. F -> 1 as phi -> 0, Re -> 0.
+    const double phi = 1.0 - eps;
+    const double Re = eps * rhof * d * vmag / mu;
+    const double e2 = eps * eps;
+    double F = 10.0 * phi / e2 + e2 * (1.0 + 1.5 * Kokkos::sqrt(phi));
+    if (Re > 1e-12) {
+      F += 0.413 * Re / (24.0 * e2) *
+           (1.0 / eps + 3.0 * eps * phi + 8.4 * Kokkos::pow(Re, -0.343)) /
+           (1.0 + Kokkos::pow(10.0, 3.0 * phi) * Kokkos::pow(Re, -0.5 * (1.0 + 4.0 * phi)));
+    }
+    beta_over_n = 3.0 * M_PI * mu * d * eps * F;
   } else if (kind == GIDASPOW) {
     // Gidaspow (1994): Ergun for the dense regime, Wen & Yu for the dilute, switched at eps = 0.8.
     beta_over_n = (eps < 0.8) ? ergunBetaOverN(vmag, d, mu, rhof, eps, Vp)
