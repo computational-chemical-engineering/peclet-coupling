@@ -121,6 +121,15 @@ class CfdDem:
             self._solidvol = xp.zeros((self.ex, self.ey, self.ez), dtype=xp.float64, order="F")
             self._eps = xp.ones((self.ex, self.ey, self.ez), dtype=xp.float64, order="F")
         if self.porous:
+            # The porous projection lives on the cut-cell pressure operator (eps-weighted
+            # coefficients ride the openness rails). A domain-BC-only box (no set_solid /
+            # set_pressure_geometry) has no such operator, and flow would silently solve plain
+            # div(u)=0 — the gas never accelerates to the interstitial velocity in the bed and the
+            # drag is far too weak to fluidize. Auto-install an all-fluid geometry in that case
+            # (flow's project() now also throws rather than silently degrade).
+            if hasattr(flow, "has_cutcell_pressure") and not flow.has_cutcell_pressure():
+                allfluid = np.full((self.nx, self.ny, self.nz), 1e6, dtype=np.float64)
+                flow.set_pressure_geometry(allfluid.flatten(order="F"))
             flow.set_porous_continuity(True)  # projection enforces d(eps)/dt + div(eps u) = 0
         # Gas convection ON by default: fully-implicit FOU operator + explicit deferred-correction
         # TVD (unconditionally stable at the large coupled dt on both the periodic and domain-BC
