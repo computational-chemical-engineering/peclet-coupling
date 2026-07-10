@@ -25,7 +25,7 @@ def _sl(axis, idx):
 
 class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
-                 dem_substeps=20, eps_min=0.4, periodic=(True, True, True), h=1.0,
+                 dem_substeps=20, eps_min=0.05, smooth_width=0.0, periodic=(True, True, True), h=1.0,
                  move_particles=True, implicit_drag=True, porous=False, advection=True):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
                        DRAG_WEN_YU, DRAG_GIDASPOW)
@@ -48,11 +48,21 @@ class CfdDem:
         self.fluid_dt = float(fluid_dt)
         self.dem_substeps = int(dem_substeps)
         self.dt_dem = self.fluid_dt / self.dem_substeps
-        # Void-fraction floor. Default 0.4 ~ the random-close-packing voidage: a physical packing
-        # cannot go below ~0.36, so deposits under the floor are local over-concentration of the
-        # trilinear/wall-aware scatter, and the Ergun-branch drag (beta ~ (1-eps)^2/eps...) explodes
-        # outside its validity range (a porous Model-B bed at eps_min=0.3 diverges; 0.4 is stable).
+        # Void-fraction floor — now only a divide-by-zero guard (default 0.05), NOT a physical clamp.
+        # A dense bed's true voidage falls to the random-close-packing ~0.4 and below; clamping eps UP
+        # to 0.4 under-predicts the Ergun 1/eps^3 drag ~3x so a coarse bed never fluidizes (the old
+        # eps_min=0.4 behaviour). We instead clip only to [eps_min, 1] and tame the discretisation
+        # noise that made small clamps unstable with `smooth_width` below (the MFIX approach: physical
+        # small porosities are kept; the deposit noise is smoothed, not clamped away).
         self.eps_min = float(eps_min)
+        # Porosity smoothing length (grid cells), decoupled from the CFD cell size — MFIX's
+        # DES_DIFFUSE_WIDTH. 0 = off (plain trilinear deposit). For a coarse cell/dp bed set it ~1 cell
+        # (a few particle diameters) so the void fraction the drag sees is smooth and grid-independent;
+        # converted to `nsweeps` explicit diffusion sweeps (sigma = sqrt(2*alpha*nsweeps), alpha=1/6).
+        self.smooth_width = float(smooth_width)
+        self._smooth_alpha = 1.0 / 6.0
+        self._smooth_sweeps = (max(1, int(round(self.smooth_width ** 2 / (2.0 * self._smooth_alpha))))
+                               if self.smooth_width > 0.0 else 0)
         self.move_particles = bool(move_particles)  # False: fixed bed — skip DEM dynamics entirely
         self.implicit_drag = bool(implicit_drag)    # beta on the fluid diagonal (stable for stiff beds)
         # Volume-averaged continuity d(eps)/dt+div(eps u)=0 (proper unresolved CFD-DEM). When off the
@@ -83,6 +93,11 @@ class CfdDem:
                 self.mpi = MPI.COMM_WORLD.Get_size() > 1
         except Exception:
             self.mpi = False
+        if self.mpi and self._smooth_sweeps:  # smoothing sweeps need inter-rank halo refresh (TODO)
+            import warnings
+            warnings.warn("CfdDem: smooth_width is single-rank only for now; disabled under MPI "
+                          "(rank-boundary diffusion would be wrong without a halo exchange per sweep).")
+            self._smooth_sweeps = 0
         bo = flow.block_origin() if self.mpi else (0, 0, 0)
         self._ox, self._oy, self._oz = bo[0] * self.h, bo[1] * self.h, bo[2] * self.h
         gnx, gny, gnz = flow.global_resolution() if self.mpi else (nx, ny, nz)
@@ -242,6 +257,12 @@ class CfdDem:
             self.flow.exchange_field_add("solidvol")  # fold cross-rank + periodic ghost deposits
         else:
             self._fold(sv)
+        if self._smooth_sweeps:
+            # Diffusive smoothing of the deposited solid volume (MFIX DES_DIFFUSE_WIDTH): decouple the
+            # porosity smoothing length from the CFD cell so a coarse cell/dp bed sees a smooth,
+            # grid-independent void fraction. Volume-conserving (zero-flux at the walls). Under MPI the
+            # halo would need refreshing between sweeps — smoothing is single-rank for now.
+            self._c.smooth_solid_volume(sv, *self._gm(), self._smooth_sweeps, self._smooth_alpha)
         self._c.compute_void_fraction(sv, ep, self.inv_vcell, self.eps_min)
         if self.mpi:
             self.flow.exchange_field("eps")  # fill the ghosts the gather stencil reads

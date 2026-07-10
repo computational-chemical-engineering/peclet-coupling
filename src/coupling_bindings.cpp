@@ -85,6 +85,22 @@ NB_MODULE(_coupling, m) {
       "partition of unity so no volume leaks into the solid. Fold ghosts before compute_void_fraction.");
 
   m.def(
+      "smooth_solid_volume",
+      [](nb::ndarray<> solidvol, double ox, double oy, double oz, double h, int ex, int ey, int ez,
+         int g, int nsweeps, double alpha) {
+        auto sv = flatField(solidvol, "smooth_solid_volume(solidvol)");
+        Kokkos::View<double*, MemSpace> owner("peclet::coupling::smooth_tmp", sv.extent(0));
+        FlatV tmp(owner.data(), owner.extent(0));  // unmanaged alias: same View type as `sv`
+        peclet::coupling::smoothField(sv, tmp, gmap(ox, oy, oz, h, ex, ey, ez, g), nsweeps, alpha);
+      },
+      nb::arg("solidvol"), nb::arg("ox"), nb::arg("oy"), nb::arg("oz"), nb::arg("h"), nb::arg("ex"),
+      nb::arg("ey"), nb::arg("ez"), nb::arg("g"), nb::arg("nsweeps"), nb::arg("alpha") = 1.0 / 6.0,
+      "Volume-conserving diffusive smoothing of the deposited `solidvol` (MFIX DES_DIFFUSE_WIDTH "
+      "analog): nsweeps explicit diffusion sweeps => Gaussian sigma=sqrt(2*alpha*nsweeps) cells, "
+      "zero-flux at the domain boundary (conserves total solid volume). Call after folding ghosts, "
+      "before compute_void_fraction.");
+
+  m.def(
       "compute_void_fraction",
       [](nb::ndarray<> solidvol, nb::ndarray<> eps, double inv_vcell, double eps_min) {
         peclet::coupling::voidFraction(flatField(solidvol, "solidvol"), flatField(eps, "eps"),

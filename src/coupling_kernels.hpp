@@ -130,7 +130,51 @@ void depositSolidVolume(int np, PosV pos, RadV rad, FieldV solidvol, FieldV sdf,
       });
 }
 
-// eps = clamp(1 - solidvol/Vcell, epsMin, 1) over the whole (padded) field.
+// Volume-conserving diffusive smoothing of a deposited field (the MFIX DES_DIFFUSE_WIDTH analog).
+// `nsweeps` explicit Jacobi diffusion sweeps with per-neighbour coefficient `alpha` (<= 1/6 for 3D
+// stability) spread each particle's deposited volume over a Gaussian of length sigma = sqrt(2*alpha*
+// nsweeps) cells, DECOUPLING the porosity smoothing length from the CFD cell size — the fix a coarse
+// cell/dp bed needs for a smooth, grid-independent void fraction (MFIX-Exa: "smoothing of the fields
+// is crucial to achieve grid-independent results"). Zero-flux (Neumann) at the inner-domain boundary
+// so nothing diffuses out through the distributor/walls and the total solid volume is conserved
+// exactly (the discrete zero-flux Laplacian sums to zero over the inner cells). Ping-pongs between
+// `f` and scratch `tmp` (same padded size); the result is left in `f`. Ghost cells are never read
+// (neighbours outside the inner domain contribute the cell's own value => zero flux), so the caller's
+// ghost fill after this is unaffected. NOTE: smooths across immersed-solid cells too — fine for the
+// walled beds here (no inner SDF); an SDF-masked variant is a follow-up.
+template <class FieldV>
+void smoothField(FieldV f, FieldV tmp, GridMap m, int nsweeps, double alpha) {
+  using Exec = Kokkos::DefaultExecutionSpace;
+  const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g, g = m.g;
+  const long sx = 1, sy = m.ex, sz = (long)m.ex * m.ey;
+  Kokkos::deep_copy(tmp, f);  // seed ghosts so an odd-count final copy-back preserves f's ghost cells
+  for (int s = 0; s < nsweeps; ++s) {
+    FieldV src = (s % 2 == 0) ? f : tmp;
+    FieldV dst = (s % 2 == 0) ? tmp : f;
+    Kokkos::parallel_for(
+        "peclet::coupling::smooth",
+        Kokkos::MDRangePolicy<Exec, Kokkos::Rank<3>>({0, 0, 0}, {nx, ny, nz}),
+        KOKKOS_LAMBDA(int ix, int iy, int iz) {
+          const long c = (long)(ix + g) + (long)(iy + g) * sy + (long)(iz + g) * sz;
+          const double v = (double)src(c);
+          double lap = 0.0;  // zero-flux: an out-of-domain neighbour contributes v (no gradient)
+          lap += (ix > 0 ? (double)src(c - sx) : v) - v;
+          lap += (ix < nx - 1 ? (double)src(c + sx) : v) - v;
+          lap += (iy > 0 ? (double)src(c - sy) : v) - v;
+          lap += (iy < ny - 1 ? (double)src(c + sy) : v) - v;
+          lap += (iz > 0 ? (double)src(c - sz) : v) - v;
+          lap += (iz < nz - 1 ? (double)src(c + sz) : v) - v;
+          dst(c) = (typename FieldV::value_type)(v + alpha * lap);
+        });
+  }
+  if (nsweeps % 2 == 1)
+    Kokkos::deep_copy(f, tmp);  // odd sweep count left the result in tmp
+}
+
+// eps = clamp(1 - solidvol/Vcell, epsMin, 1) over the whole (padded) field. With smoothing on and a
+// small epsMin, epsMin is only a divide-by-zero guard; the physical void fraction (which can fall
+// well below the random-close-packing 0.4 in a dense cell) is preserved instead of being clamped up —
+// clamping ε up to 0.4 under-predicts the Ergun 1/ε^3 drag ~3x in a dense bed and it never fluidizes.
 template <class FieldV>
 void voidFraction(FieldV solidvol, FieldV eps, double invVcell, double epsMin) {
   using Exec = Kokkos::DefaultExecutionSpace;
