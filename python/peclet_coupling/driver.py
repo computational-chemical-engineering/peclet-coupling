@@ -26,9 +26,9 @@ def _sl(axis, idx):
 class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
                  dem_substeps=20, eps_min=0.05, smooth_width=0.0, periodic=(True, True, True), h=1.0,
-                 move_particles=True, implicit_drag=True, porous=False, advection=True):
+                 move_particles=True, implicit_drag=True, porous=True, advection=True):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
-                       DRAG_WEN_YU, DRAG_GIDASPOW, DRAG_BEETSTRA)
+                       DRAG_WEN_YU, DRAG_GIDASPOW, DRAG_BEETSTRA, DRAG_TANG)
         self._c = _coupling
         self.flow = flow
         self.dem = dem
@@ -65,8 +65,12 @@ class CfdDem:
                                if self.smooth_width > 0.0 else 0)
         self.move_particles = bool(move_particles)  # False: fixed bed — skip DEM dynamics entirely
         self.implicit_drag = bool(implicit_drag)    # beta on the fluid diagonal (stable for stiff beds)
-        # Volume-averaged continuity d(eps)/dt+div(eps u)=0 (proper unresolved CFD-DEM). When off the
-        # fluid is solved incompressible (eps only in the drag) — cheaper, fine for dilute/steady beds.
+        # Volume-averaged continuity d(eps)/dt+div(eps u)=0 (proper unresolved CFD-DEM) — the DEFAULT:
+        # porosity must enter the volume-averaged Navier-Stokes equations, not just the drag closure.
+        # (MFIX-Exa likewise advects with the superficial velocity and projects div(eps u)=0; its
+        # d(eps)/dt constraint term is optional/"under development" — ours keeps it.) porous=False
+        # solves plain incompressible NS (eps only in the drag): a cheaper approximation for
+        # dilute/steady beds, not a faithful CFD-DEM.
         self.porous = bool(porous)
         self.h = float(h)
         self.inv_vcell = 1.0 / (self.h ** 3)
@@ -74,7 +78,8 @@ class CfdDem:
         self.drag_kind = {"stokes": DRAG_STOKES, "schiller_naumann": DRAG_SCHILLER_NAUMANN,
                           "ergun": DRAG_ERGUN, "di_felice": DRAG_DI_FELICE,
                           "wen_yu": DRAG_WEN_YU, "gidaspow": DRAG_GIDASPOW,
-                          "beetstra": DRAG_BEETSTRA, "bvk": DRAG_BEETSTRA}[drag]
+                          "beetstra": DRAG_BEETSTRA, "bvk": DRAG_BEETSTRA,
+                          "tang": DRAG_TANG, "bvk2": DRAG_TANG}[drag]
 
         nx, ny, nz = flow.get_resolution()  # LOCAL block dims under MPI
         self.g = flow.ghost_width()

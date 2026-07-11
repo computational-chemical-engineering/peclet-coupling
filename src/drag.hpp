@@ -26,7 +26,9 @@ enum DragKind {
   DI_FELICE = 3,
   WEN_YU = 4,
   GIDASPOW = 5,
-  BEETSTRA = 6  // Beetstra-van der Hoef-Kuipers DNS drag (MFIX's "BVK2")
+  BEETSTRA = 6,  // Beetstra-van der Hoef-Kuipers DNS drag (the published "BVK2")
+  TANG = 7       // Tang-Peters-Kuipers-Kriebitzsch-van der Hoef (2015) — what MFIX-Exa's
+                 // "BVK2" option ACTUALLY executes (the Beetstra branch is #if 0'd out)
 };
 
 // Wen & Yu interphase drag coefficient per particle, F = beta_over_n * vrel. The dilute branch of
@@ -90,6 +92,22 @@ KOKKOS_INLINE_FUNCTION void dragForce(int kind, double vx, double vy, double vz,
       F += 0.413 * Re / (24.0 * e2) *
            (1.0 / eps + 3.0 * eps * phi + 8.4 * Kokkos::pow(Re, -0.343)) /
            (1.0 + Kokkos::pow(10.0, 3.0 * phi) * Kokkos::pow(Re, -0.5 * (1.0 + 4.0 * phi)));
+    }
+    beta_over_n = 3.0 * M_PI * mu * d * eps * F;
+  } else if (kind == TANG) {
+    // Tang, Peters, Kuipers, Kriebitzsch & van der Hoef (AIChE J 61, 688, 2015) monodisperse DNS
+    // drag — the correlation MFIX-Exa's "BVK2" drag option actually executes (verified against
+    // mfix_des_drag_K.H: the Beetstra 2007 branch there is compiled out). Same static part as
+    // Beetstra; the inertial part is ~15% stronger for Re ~ 2-20. Same normalization + Re as BVK:
+    // per-particle F = 3 pi mu d eps F(phi,Re) vrel, Re the voidage particle Reynolds number.
+    const double phi = 1.0 - eps;
+    const double Re = eps * rhof * d * vmag / mu;
+    const double e2 = eps * eps;
+    const double inv_e4 = 1.0 / (e2 * e2);
+    double F = 10.0 * phi / e2 + e2 * (1.0 + 1.5 * Kokkos::sqrt(phi));
+    if (Re > 1e-12) {
+      F += Re * (0.11 * phi * (1.0 + phi) - 4.56e-3 * inv_e4 +
+                 Kokkos::pow(Re, -0.343) * (0.169 * eps + 6.44e-2 * inv_e4));
     }
     beta_over_n = 3.0 * M_PI * mu * d * eps * F;
   } else if (kind == GIDASPOW) {

@@ -14,9 +14,10 @@ DRAG_ERGUN = 2
 DRAG_DI_FELICE = 3
 DRAG_WEN_YU = 4
 DRAG_GIDASPOW = 5  # Ergun (dense) + Wen & Yu (dilute), switched at eps = 0.8
-DRAG_BEETSTRA = 6  # Beetstra-van der Hoef-Kuipers (2007) DNS drag — MFIX(-Exa)'s "BVK2"
+DRAG_BEETSTRA = 6  # Beetstra-van der Hoef-Kuipers (2007) DNS drag — the published "BVK2"
+DRAG_TANG = 7      # Tang et al. (2015) DNS drag — what MFIX-Exa's "BVK2" option actually executes
 
 __version__ = "0.2.0"
 
 __all__ = ["CfdDem", "_coupling", "DRAG_STOKES", "DRAG_SCHILLER_NAUMANN", "DRAG_ERGUN",
-           "DRAG_DI_FELICE", "DRAG_WEN_YU", "DRAG_GIDASPOW", "DRAG_BEETSTRA"]
+           "DRAG_DI_FELICE", "DRAG_WEN_YU", "DRAG_GIDASPOW", "DRAG_BEETSTRA", "DRAG_TANG"]
