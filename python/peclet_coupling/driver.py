@@ -63,14 +63,14 @@ class CfdDem:
         self.smooth_width = float(smooth_width)
         # Volume-averaging validity: eps must be smooth over >~ the particle scale. With cells not
         # much larger than d_p the raw trilinear deposit is not a proper volume filter — smooth it.
-        if np.isscalar(radius) and self.h < 3.0 * (2.0 * float(radius)) \
-                and self.smooth_width * self.h < 1.5 * (2.0 * float(radius)):
+        if np.isscalar(radius) and float(h) < 3.0 * (2.0 * float(radius)) \
+                and self.smooth_width * float(h) < 1.5 * (2.0 * float(radius)):
             import warnings
             warnings.warn(
-                f"CfdDem: cell size h={self.h:g} is < 3 particle diameters and smooth_width is "
+                f"CfdDem: cell size h={float(h):g} is < 3 particle diameters and smooth_width is "
                 f"below ~1.5 d_p — the deposited void fraction is not a proper volume average at "
                 f"this resolution. Set smooth_width so the smoothing length exceeds the particle "
-                f"diameter (e.g. smooth_width={1.5 * 2.0 * float(radius) / self.h:.1f}).")
+                f"diameter (e.g. smooth_width={1.5 * 2.0 * float(radius) / float(h):.1f}).")
         self._smooth_alpha = 1.0 / 6.0
         self._smooth_sweeps = (max(1, int(round(self.smooth_width ** 2 / (2.0 * self._smooth_alpha))))
                                if self.smooth_width > 0.0 else 0)
