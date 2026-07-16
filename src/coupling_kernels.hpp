@@ -48,6 +48,25 @@ KOKKOS_INLINE_FUNCTION bool cornerIsFluid(const MaskV& sdf, long o) {
   return (double)sdf(o) >= 0.0;
 }
 
+// Stiff-safe (exponential-integrator) effective drag coefficient. The particle-side exchange applies
+// a CONSTANT force over the coupling interval dt (dem substeps accumulate it linearly), so the raw
+// linear coefficient beta is explicit there and blows up for beta*dt/m >~ 1 (measured: a coupled
+// fluidized bed doubling |v| per step once the eps-conservative projection raised the interstitial
+// velocities). The exact solution of m dv/dt = beta (u - v) over dt is reproduced by the constant
+// force F = beta_eff (u - v0) with
+//   beta_eff = (m/dt) (1 - exp(-beta dt / m))
+// — equal to beta for beta*dt/m << 1 and saturating at m/dt (v lands exactly ON u, never beyond):
+// unconditionally stable for any drag stiffness. Used for the particle force AND the fluid-side
+// deposits (beta / feedback), so the exchange stays momentum-conserving. invM <= 0 (static) => raw.
+KOKKOS_INLINE_FUNCTION double effectiveBeta(double beta, double invM, double dt) {
+  if (invM <= 0.0 || beta <= 0.0 || dt <= 0.0)
+    return beta;
+  const double x = beta * invM * dt;          // beta*dt/m
+  if (x < 1e-4)
+    return beta;                              // expm1 not needed; avoids 0/0 noise
+  return (1.0 - Kokkos::exp(-x)) / (invM * dt);
+}
+
 // Wall-aware trilinear gather: interpolate a cell-centred field at the particle using ONLY the fluid
 // corners, reweighted to a partition of unity (a solid corner carries no data — its velocity is the
 // no-slip 0 and its eps is meaningless — so including it biases the interpolant). Reduces to plain
@@ -193,11 +212,11 @@ void voidFraction(FieldV solidvol, FieldV eps, double invVcell, double epsMin) {
 // Fused drag + feedback. Gathers (uf,vf,wf,eps) at each particle, evaluates the drag law, writes the
 // drag force to fdrag(p,:) (dem external force), and scatters the reaction -F*invVcell onto the
 // (pre-zeroed) grid force-density fields fx,fy,fz. rho/mu physical; dragKind per drag.hpp.
-template <class PosV, class VelV, class RadV, class FieldV, class OutV>
-void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV vf, FieldV wf,
-                         FieldV eps, FieldV sdf, OutV fdrag, FieldV fx, FieldV fy, FieldV fz,
-                         GridMap m, double mu, double rhof, double invVcell, int dragKind,
-                         bool modelB) {
+template <class PosV, class VelV, class RadV, class InvMV, class FieldV, class OutV>
+void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, InvMV invMass, FieldV uf, FieldV vf,
+                         FieldV wf, FieldV eps, FieldV sdf, OutV fdrag, FieldV fx, FieldV fy,
+                         FieldV fz, GridMap m, double mu, double rhof, double invVcell, int dragKind,
+                         bool modelB, double dtExch) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
@@ -228,6 +247,21 @@ void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
           Fy /= eP;
           Fz /= eP;
         }
+        // Stiff-safe cap: rescale the force by beta_eff/beta (see effectiveBeta).
+        {
+          const double vmag2 = vrx * vrx + vry * vry + vrz * vrz;
+          if (vmag2 > 1e-60) {
+            const double vmag = Kokkos::sqrt(vmag2);
+            const double bon = Kokkos::sqrt(Fx * Fx + Fy * Fy + Fz * Fz) / vmag;
+            const double be = effectiveBeta(bon, (double)invMass(p), dtExch);
+            if (bon > 0.0) {
+              const double sc = be / bon;
+              Fx *= sc;
+              Fy *= sc;
+              Fz *= sc;
+            }
+          }
+        }
         fdrag(p, 0) = (typename OutV::value_type)Fx;
         fdrag(p, 1) = (typename OutV::value_type)Fy;
         fdrag(p, 2) = (typename OutV::value_type)Fz;
@@ -243,11 +277,11 @@ void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
 // treats -beta*(u - u_p) implicitly (unconditionally stable for a stiff bed). The particle drag
 // force (evaluated at the current slip) still goes to `fdrag` (explicit on the particle side).
 // beta_over_n = |F_p| / |vrel|, recovered from the drag law by a unit-slip evaluation.
-template <class PosV, class VelV, class RadV, class FieldV, class OutV>
-void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV vf, FieldV wf,
-                         FieldV eps, FieldV sdf, OutV fdrag, FieldV dragBeta, FieldV fx, FieldV fy,
-                         FieldV fz, GridMap m, double mu, double rhof, double invVcell, int dragKind,
-                         bool modelB) {
+template <class PosV, class VelV, class RadV, class InvMV, class FieldV, class OutV>
+void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, InvMV invMass, FieldV uf, FieldV vf,
+                         FieldV wf, FieldV eps, FieldV sdf, OutV fdrag, FieldV dragBeta, FieldV fx,
+                         FieldV fy, FieldV fz, GridMap m, double mu, double rhof, double invVcell,
+                         int dragKind, bool modelB, double dtExch) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
@@ -277,13 +311,22 @@ void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, FieldV uf, FieldV
           Fy /= eP;
           Fz /= eP;
         }
+        // beta_over_n = |F|/|vrel| (isotropic linear coefficient at the frozen slip), then the
+        // stiff-safe exponential-integrator cap (effectiveBeta) — used consistently for the
+        // particle force AND the fluid-side deposits so the exchange conserves momentum.
+        const double vmag = Kokkos::sqrt(vrx * vrx + vry * vry + vrz * vrz);
+        const double Fmag = Kokkos::sqrt(Fx * Fx + Fy * Fy + Fz * Fz);
+        const double bonRaw = (vmag > 1e-30) ? Fmag / vmag : 0.0;
+        const double bon = effectiveBeta(bonRaw, (double)invMass(p), dtExch);
+        if (bonRaw > 0.0) {
+          const double sc = bon / bonRaw;
+          Fx *= sc;
+          Fy *= sc;
+          Fz *= sc;
+        }
         fdrag(p, 0) = (typename OutV::value_type)Fx;
         fdrag(p, 1) = (typename OutV::value_type)Fy;
         fdrag(p, 2) = (typename OutV::value_type)Fz;
-        // beta_over_n = |F|/|vrel| (isotropic linear coefficient at the frozen slip)
-        const double vmag = Kokkos::sqrt(vrx * vrx + vry * vry + vrz * vrz);
-        const double Fmag = Kokkos::sqrt(Fx * Fx + Fy * Fy + Fz * Fz);
-        const double bon = (vmag > 1e-30) ? Fmag / vmag : 0.0;
         scatterAtMasked(dragBeta, sdf, b, sx, sy, sz, wx, wy, wz, bon * invVcell);
         scatterAtMasked(fx, sdf, b, sx, sy, sz, wx, wy, wz, bon * upx * invVcell);
         scatterAtMasked(fy, sdf, b, sx, sy, sz, wx, wy, wz, bon * upy * invVcell);

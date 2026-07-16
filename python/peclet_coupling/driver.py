@@ -295,17 +295,25 @@ class CfdDem:
         gm = self._gm()
         has_p = pos.shape[0] > 0  # a rank may own no particles under MPI (skip the per-particle
         db = self._fv("drag_beta") if self.implicit_drag else None  # kernels, keep the collectives)
+        # per-particle inverse mass (zero-copy dem view) for the stiff-safe exponential-integrator
+        # drag cap: beta_eff = (m/dt)(1 - exp(-beta dt/m)) — exact for linear drag over the coupling
+        # interval, unconditionally stable for any drag stiffness (the explicit per-substep force
+        # application otherwise blows up once beta*dt/m ~ 1).
+        im = self.xp.from_dlpack(self.dem.get_inv_mass_view()) if self.device \
+            else np.asarray(self.dem.get_inv_mass_view())
         # porous (volume-averaged, Model B: the fluid carries the full -grad p) converts the drag
         # closures beta_B = beta_A/eps inside the kernel (model_b flag); the incompressible mode
         # keeps the literature Model-A forms unchanged.
         if has_p and self.implicit_drag:
-            self._c.compute_drag_implicit(pos, vel, self._rad, uf, vf, wf, self._eps, sd, self._fdrag,
-                                          db, fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
-                                          self.drag_kind, self.porous)
+            self._c.compute_drag_implicit(pos, vel, self._rad, im, uf, vf, wf, self._eps, sd,
+                                          self._fdrag, db, fx, fy, fz, *gm, self.mu, self.rho,
+                                          self.inv_vcell, self.drag_kind, self.porous,
+                                          self.fluid_dt)
         elif has_p:
-            self._c.compute_drag_feedback(pos, vel, self._rad, uf, vf, wf, self._eps, sd, self._fdrag,
-                                          fx, fy, fz, *gm, self.mu, self.rho, self.inv_vcell,
-                                          self.drag_kind, self.porous)
+            self._c.compute_drag_feedback(pos, vel, self._rad, im, uf, vf, wf, self._eps, sd,
+                                          self._fdrag, fx, fy, fz, *gm, self.mu, self.rho,
+                                          self.inv_vcell, self.drag_kind, self.porous,
+                                          self.fluid_dt)
         if self.implicit_drag:
             if self.mpi:
                 self._fold_domain(db)
