@@ -25,7 +25,7 @@ def _sl(axis, idx):
 
 class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
-                 dem_substeps=20, eps_min=0.05, smooth_width=0.0, periodic=(True, True, True), h=1.0,
+                 dem_substeps=20, eps_min=0.25, smooth_width=0.0, periodic=(True, True, True), h=1.0,
                  move_particles=True, implicit_drag=True, porous=True, advection=True):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
                        DRAG_WEN_YU, DRAG_GIDASPOW, DRAG_BEETSTRA, DRAG_TANG)
@@ -48,18 +48,29 @@ class CfdDem:
         self.fluid_dt = float(fluid_dt)
         self.dem_substeps = int(dem_substeps)
         self.dt_dem = self.fluid_dt / self.dem_substeps
-        # Void-fraction floor — now only a divide-by-zero guard (default 0.05), NOT a physical clamp.
-        # A dense bed's true voidage falls to the random-close-packing ~0.4 and below; clamping eps UP
-        # to 0.4 under-predicts the Ergun 1/eps^3 drag ~3x so a coarse bed never fluidizes (the old
-        # eps_min=0.4 behaviour). We instead clip only to [eps_min, 1] and tame the discretisation
-        # noise that made small clamps unstable with `smooth_width` below (the MFIX approach: physical
-        # small porosities are kept; the deposit noise is smoothed, not clamped away).
+        # Void-fraction floor (default 0.25): a PHYSICAL regularisation, not just a guard. Real
+        # voidage bottoms out near random close packing (~0.36 monodisperse, ~0.25 for wide bidisperse
+        # mixes); anything lower can only come from numerically interpenetrated particles or deposit
+        # artifacts, and must not reach the volume-averaged fluid — the eps-conservative projection
+        # legitimately amplifies the interstitial velocity by 1/eps, so junk eps -> junk gas. 0.25
+        # keeps the Ergun/drag fidelity over the physical range (the old 0.4 clamp under-predicted
+        # dense-bed drag ~3x; the interim 0.05 guard let interpenetration artifacts detonate a bed).
         self.eps_min = float(eps_min)
         # Porosity smoothing length (grid cells), decoupled from the CFD cell size — MFIX's
         # DES_DIFFUSE_WIDTH. 0 = off (plain trilinear deposit). For a coarse cell/dp bed set it ~1 cell
         # (a few particle diameters) so the void fraction the drag sees is smooth and grid-independent;
         # converted to `nsweeps` explicit diffusion sweeps (sigma = sqrt(2*alpha*nsweeps), alpha=1/6).
         self.smooth_width = float(smooth_width)
+        # Volume-averaging validity: eps must be smooth over >~ the particle scale. With cells not
+        # much larger than d_p the raw trilinear deposit is not a proper volume filter — smooth it.
+        if np.isscalar(radius) and self.h < 3.0 * (2.0 * float(radius)) \
+                and self.smooth_width * self.h < 1.5 * (2.0 * float(radius)):
+            import warnings
+            warnings.warn(
+                f"CfdDem: cell size h={self.h:g} is < 3 particle diameters and smooth_width is "
+                f"below ~1.5 d_p — the deposited void fraction is not a proper volume average at "
+                f"this resolution. Set smooth_width so the smoothing length exceeds the particle "
+                f"diameter (e.g. smooth_width={1.5 * 2.0 * float(radius) / self.h:.1f}).")
         self._smooth_alpha = 1.0 / 6.0
         self._smooth_sweeps = (max(1, int(round(self.smooth_width ** 2 / (2.0 * self._smooth_alpha))))
                                if self.smooth_width > 0.0 else 0)
@@ -284,6 +295,10 @@ class CfdDem:
             self._fill_domain(ep)
         else:
             self._fill(ep)
+        # Non-periodic ghost fills extrapolate and can leave eps outside [eps_min, 1] (observed
+        # 1.95 at a freeboard boundary); the porous coefficients and the gather stencil read those
+        # ghosts, so clamp the whole padded block to the physical range.
+        self.xp.clip(ep, self.eps_min, 1.0, out=ep)
         self._eps = ep  # compute_forces reads this at the particles
 
     def compute_forces(self, pos, vel):
