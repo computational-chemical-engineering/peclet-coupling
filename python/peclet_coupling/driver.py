@@ -26,7 +26,8 @@ def _sl(axis, idx):
 class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
                  dem_substeps=20, eps_min=0.25, smooth_width=0.0, periodic=(True, True, True), h=1.0,
-                 move_particles=True, implicit_drag=True, porous=True, advection=True):
+                 move_particles=True, implicit_drag=True, porous=True, advection=True,
+                 gravity=(0.0, 0.0, 0.0)):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
                        DRAG_WEN_YU, DRAG_GIDASPOW, DRAG_BEETSTRA, DRAG_TANG)
         self._c = _coupling
@@ -85,6 +86,10 @@ class CfdDem:
         self.porous = bool(porous)
         self.h = float(h)
         self.inv_vcell = 1.0 / (self.h ** 3)
+        # Constant external acceleration dem applies per substep (its set_gravity vector; dem has
+        # no getter, so pass it here too). Feeds the stiff-safe drag cap's gravity-exact correction
+        # F -= m g (1 - beta_eff/beta), which restores the physical steady-state slip m g / beta.
+        self.gravity = tuple(float(c) for c in gravity)
         self.periodic = tuple(bool(p) for p in periodic)
         self.drag_kind = {"stokes": DRAG_STOKES, "schiller_naumann": DRAG_SCHILLER_NAUMANN,
                           "ergun": DRAG_ERGUN, "di_felice": DRAG_DI_FELICE,
@@ -349,12 +354,12 @@ class CfdDem:
             self._c.compute_drag_implicit(pos, vel, self._rad, im, uf, vf, wf, self._eps, sd,
                                           self._fdrag, db, fx, fy, fz, *gm, self.mu, self.rho,
                                           self.inv_vcell, self.drag_kind, self.porous,
-                                          dt_exch)
+                                          dt_exch, *self.gravity)
         elif has_p:
             self._c.compute_drag_feedback(pos, vel, self._rad, im, uf, vf, wf, self._eps, sd,
                                           self._fdrag, fx, fy, fz, *gm, self.mu, self.rho,
                                           self.inv_vcell, self.drag_kind, self.porous,
-                                          dt_exch)
+                                          dt_exch, *self.gravity)
         if self.implicit_drag:
             if self.mpi:
                 self._fold_domain(db)

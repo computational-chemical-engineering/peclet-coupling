@@ -227,7 +227,7 @@ template <class PosV, class VelV, class RadV, class InvMV, class FieldV, class O
 void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, InvMV invMass, FieldV uf, FieldV vf,
                          FieldV wf, FieldV eps, FieldV sdf, OutV fdrag, FieldV fx, FieldV fy,
                          FieldV fz, GridMap m, double mu, double rhof, double invVcell, int dragKind,
-                         bool modelB, double dtExch) {
+                         bool modelB, double dtExch, double gx, double gy, double gz) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
@@ -258,18 +258,32 @@ void computeDragFeedback(int np, PosV pos, VelV vel, RadV rad, InvMV invMass, Fi
           Fy /= eP;
           Fz /= eP;
         }
-        // Stiff-safe cap: rescale the force by beta_eff/beta (see effectiveBeta).
+        // Stiff-safe cap + gravity-exact correction. The constant force reproducing the exact
+        // endpoint of m dv/dt = beta (u - v) + m g over dtExch is
+        //   F = beta_eff (u - v0) - m g (1 - beta_eff/beta)
+        // — without the g term the discrete steady state balances at slip = m g / beta_eff (biased
+        // by the cap factor, measured 26% on the Stokes terminal-velocity test); with it the fixed
+        // point is the physical slip = m g / beta. F*dt stays the exact drag impulse, so the fluid
+        // reaction (-F) remains exactly momentum-conserving. g is the constant external
+        // acceleration dem applies per substep (gravity); invM<=0 or dtExch<=0 => raw beta, no
+        // correction.
         {
           const double vmag2 = vrx * vrx + vry * vry + vrz * vrz;
           if (vmag2 > 1e-60) {
             const double vmag = Kokkos::sqrt(vmag2);
             const double bon = Kokkos::sqrt(Fx * Fx + Fy * Fy + Fz * Fz) / vmag;
-            const double be = effectiveBeta(bon, (double)invMass(p), dtExch);
+            const double invM = (double)invMass(p);
             if (bon > 0.0) {
-              const double sc = be / bon;
+              const double sc = effectiveBeta(bon, invM, dtExch) / bon;
               Fx *= sc;
               Fy *= sc;
               Fz *= sc;
+              if (invM > 0.0 && sc < 1.0) {
+                const double corr = (1.0 - sc) / invM;  // m (1 - beta_eff/beta)
+                Fx -= corr * gx;
+                Fy -= corr * gy;
+                Fz -= corr * gz;
+              }
             }
           }
         }
@@ -292,7 +306,8 @@ template <class PosV, class VelV, class RadV, class InvMV, class FieldV, class O
 void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, InvMV invMass, FieldV uf, FieldV vf,
                          FieldV wf, FieldV eps, FieldV sdf, OutV fdrag, FieldV dragBeta, FieldV fx,
                          FieldV fy, FieldV fz, GridMap m, double mu, double rhof, double invVcell,
-                         int dragKind, bool modelB, double dtExch) {
+                         int dragKind, bool modelB, double dtExch, double gx, double gy,
+                         double gz) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g;
   Kokkos::parallel_for(
@@ -324,24 +339,37 @@ void computeDragImplicit(int np, PosV pos, VelV vel, RadV rad, InvMV invMass, Fi
         }
         // beta_over_n = |F|/|vrel| (isotropic linear coefficient at the frozen slip), then the
         // stiff-safe exponential-integrator cap (effectiveBeta) — used consistently for the
-        // particle force AND the fluid-side deposits so the exchange conserves momentum.
+        // particle force AND the fluid-side deposits so the exchange conserves momentum. The
+        // gravity-exact correction -m g (1 - beta_eff/beta) (see computeDragFeedback) rides the
+        // particle force, and its reaction is deposited as a constant term with the drag target.
         const double vmag = Kokkos::sqrt(vrx * vrx + vry * vry + vrz * vrz);
         const double Fmag = Kokkos::sqrt(Fx * Fx + Fy * Fy + Fz * Fz);
         const double bonRaw = (vmag > 1e-30) ? Fmag / vmag : 0.0;
         const double bon = effectiveBeta(bonRaw, (double)invMass(p), dtExch);
+        double cgx = 0.0, cgy = 0.0, cgz = 0.0;  // m (1 - beta_eff/beta) * g
         if (bonRaw > 0.0) {
           const double sc = bon / bonRaw;
           Fx *= sc;
           Fy *= sc;
           Fz *= sc;
+          const double invM = (double)invMass(p);
+          if (invM > 0.0 && sc < 1.0) {
+            const double corr = (1.0 - sc) / invM;
+            cgx = corr * gx;
+            cgy = corr * gy;
+            cgz = corr * gz;
+            Fx -= cgx;
+            Fy -= cgy;
+            Fz -= cgz;
+          }
         }
         fdrag(p, 0) = (typename OutV::value_type)Fx;
         fdrag(p, 1) = (typename OutV::value_type)Fy;
         fdrag(p, 2) = (typename OutV::value_type)Fz;
         scatterAtMasked(dragBeta, sdf, b, sx, sy, sz, wx, wy, wz, bon * invVcell);
-        scatterAtMasked(fx, sdf, b, sx, sy, sz, wx, wy, wz, bon * upx * invVcell);
-        scatterAtMasked(fy, sdf, b, sx, sy, sz, wx, wy, wz, bon * upy * invVcell);
-        scatterAtMasked(fz, sdf, b, sx, sy, sz, wx, wy, wz, bon * upz * invVcell);
+        scatterAtMasked(fx, sdf, b, sx, sy, sz, wx, wy, wz, (bon * upx + cgx) * invVcell);
+        scatterAtMasked(fy, sdf, b, sx, sy, sz, wx, wy, wz, (bon * upy + cgy) * invVcell);
+        scatterAtMasked(fz, sdf, b, sx, sy, sz, wx, wy, wz, (bon * upz + cgz) * invVcell);
       });
 }
 

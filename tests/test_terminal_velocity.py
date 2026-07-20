@@ -27,7 +27,8 @@ def terminal(drag, g=1e-3, r=1.0, mu=1.0, rho_p=1.0, rho_f=1.0, N=32, steps=120)
     d.set_gravity(0, 0, -g)  # acceleration
     d.set_positions(np.array([[N / 2, N / 2, N / 2, 1.0 / m_p]], dtype=np.float32))  # w = invMass
     d.set_velocities(np.zeros((1, 3), dtype=np.float32))
-    cpl = CfdDem(s, d, fluid_dt=0.1, mu=mu, rho=rho_f, radius=r, drag=drag, dem_substeps=10)
+    cpl = CfdDem(s, d, fluid_dt=0.1, mu=mu, rho=rho_f, radius=r, drag=drag, dem_substeps=10,
+                 porous=False, gravity=(0, 0, -g))
     slip_hist = []
     for _ in range(steps):
         cpl.step()
