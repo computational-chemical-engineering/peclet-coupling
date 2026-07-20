@@ -48,7 +48,7 @@ def run_bed(f_drive, eps_target=0.6, N=16, mu=1.0, rho=1.0, dt=0.5, steps=120):
     d.enable_periodicity(True, True, True)
     d.set_positions(posw)
     d.set_velocities(np.zeros((Np, 3), dtype=np.float32))
-    cpl = CfdDem(s, d, fluid_dt=dt, mu=mu, rho=rho, radius=r, drag="ergun", eps_min=0.05,
+    cpl = CfdDem(s, d, fluid_dt=dt, mu=mu, rho=rho, radius=r, drag="ergun", eps_min=0.05, porous=False,
                  move_particles=False)  # fixed bed: no DEM dynamics
     for _ in range(steps):
         cpl.step()

@@ -110,15 +110,26 @@ class CfdDem:
                 self.mpi = MPI.COMM_WORLD.Get_size() > 1
         except Exception:
             self.mpi = False
-        if self.mpi and self._smooth_sweeps:  # smoothing sweeps need inter-rank halo refresh (TODO)
-            import warnings
-            warnings.warn("CfdDem: smooth_width is single-rank only for now; disabled under MPI "
-                          "(rank-boundary diffusion would be wrong without a halo exchange per sweep).")
-            self._smooth_sweeps = 0
         bo = flow.block_origin() if self.mpi else (0, 0, 0)
         self._ox, self._oy, self._oz = bo[0] * self.h, bo[1] * self.h, bo[2] * self.h
         gnx, gny, gnz = flow.global_resolution() if self.mpi else (nx, ny, nz)
         self.gnx, self.gny, self.gnz = gnx, gny, gnz
+        # Smoothing under MPI: a local block face that is an INTERIOR rank boundary is not a wall —
+        # the diffusion sweep must read the halo ghost there (bit set), while faces on the GLOBAL
+        # domain boundary keep the validated single-rank zero-flux closed-box behaviour (bit clear,
+        # also on periodic axes, matching the single-rank path byte-for-byte). The sweep loop in
+        # update_void_fraction halo-refreshes solidvol before every sweep, so multi-rank smoothing
+        # reproduces the single-rank arithmetic exactly.
+        self._smooth_open = 0
+        if self.mpi:
+            lo = (bo[0], bo[1], bo[2])
+            dims = (nx, ny, nz)
+            gdims = (gnx, gny, gnz)
+            for a in range(3):
+                if lo[a] > 0:
+                    self._smooth_open |= 1 << (2 * a)
+                if lo[a] + dims[a] < gdims[a]:
+                    self._smooth_open |= 1 << (2 * a + 1)
         # The CURRENT shared decomposition, as an x-fastest per-cell weight field. Uniform => the
         # default equal-cell ORB flow's init_mpi built; rebalance() overwrites it. dem is migrated onto
         # this each moving step so its ownership tracks flow's grid partition (the deposit stays
@@ -286,9 +297,18 @@ class CfdDem:
         if self._smooth_sweeps:
             # Diffusive smoothing of the deposited solid volume (MFIX DES_DIFFUSE_WIDTH): decouple the
             # porosity smoothing length from the CFD cell so a coarse cell/dp bed sees a smooth,
-            # grid-independent void fraction. Volume-conserving (zero-flux at the walls). Under MPI the
-            # halo would need refreshing between sweeps — smoothing is single-rank for now.
-            self._c.smooth_solid_volume(sv, *self._gm(), self._smooth_sweeps, self._smooth_alpha)
+            # grid-independent void fraction. Volume-conserving (zero-flux at the global walls).
+            if self.mpi:
+                # Interior rank faces diffuse across the block boundary: refresh the halo before
+                # every Jacobi sweep so open faces read the neighbour's pre-sweep values — this
+                # reproduces the single-rank closed-box arithmetic exactly (global faces stay
+                # zero-flux, flux across rank faces is antisymmetric => volume conserved).
+                for _ in range(self._smooth_sweeps):
+                    self.flow.exchange_field("solidvol")
+                    self._c.smooth_solid_volume(sv, *self._gm(), 1, self._smooth_alpha,
+                                                self._smooth_open)
+            else:
+                self._c.smooth_solid_volume(sv, *self._gm(), self._smooth_sweeps, self._smooth_alpha)
         self._c.compute_void_fraction(sv, ep, self.inv_vcell, self.eps_min)
         if self.mpi:
             self.flow.exchange_field("eps")  # fill the ghosts the gather stencil reads
@@ -316,6 +336,12 @@ class CfdDem:
         # application otherwise blows up once beta*dt/m ~ 1).
         im = self.xp.from_dlpack(self.dem.get_inv_mass_view()) if self.device \
             else np.asarray(self.dem.get_inv_mass_view())
+        # The cap models the PARTICLE momentum update over the coupling interval; a fixed bed
+        # (move_particles=False) integrates no particles, so the cap must be off — dt_exch=0 makes
+        # effectiveBeta return the raw beta on both sides of the exchange. (This also guards against
+        # dem's set_positions (N,4) convention, which remaps w==0 to inv_mass=1: "fixed" bed
+        # particles otherwise look like unit-mass movers and the cap floors the dense-bed drag.)
+        dt_exch = self.fluid_dt if self.move_particles else 0.0
         # porous (volume-averaged, Model B: the fluid carries the full -grad p) converts the drag
         # closures beta_B = beta_A/eps inside the kernel (model_b flag); the incompressible mode
         # keeps the literature Model-A forms unchanged.
@@ -323,12 +349,12 @@ class CfdDem:
             self._c.compute_drag_implicit(pos, vel, self._rad, im, uf, vf, wf, self._eps, sd,
                                           self._fdrag, db, fx, fy, fz, *gm, self.mu, self.rho,
                                           self.inv_vcell, self.drag_kind, self.porous,
-                                          self.fluid_dt)
+                                          dt_exch)
         elif has_p:
             self._c.compute_drag_feedback(pos, vel, self._rad, im, uf, vf, wf, self._eps, sd,
                                           self._fdrag, fx, fy, fz, *gm, self.mu, self.rho,
                                           self.inv_vcell, self.drag_kind, self.porous,
-                                          self.fluid_dt)
+                                          dt_exch)
         if self.implicit_drag:
             if self.mpi:
                 self._fold_domain(db)

@@ -157,16 +157,26 @@ void depositSolidVolume(int np, PosV pos, RadV rad, FieldV solidvol, FieldV sdf,
 // is crucial to achieve grid-independent results"). Zero-flux (Neumann) at the inner-domain boundary
 // so nothing diffuses out through the distributor/walls and the total solid volume is conserved
 // exactly (the discrete zero-flux Laplacian sums to zero over the inner cells). Ping-pongs between
-// `f` and scratch `tmp` (same padded size); the result is left in `f`. Ghost cells are never read
-// (neighbours outside the inner domain contribute the cell's own value => zero flux), so the caller's
-// ghost fill after this is unaffected. NOTE: smooths across immersed-solid cells too — fine for the
-// walled beds here (no inner SDF); an SDF-masked variant is a follow-up.
+// `f` and scratch `tmp` (same padded size); the result is left in `f`. With `openFaces == 0` ghost
+// cells are never read (neighbours outside the inner domain contribute the cell's own value => zero
+// flux), so the caller's ghost fill after this is unaffected. Under MPI a local block face that is an
+// INTERIOR rank boundary is not a wall: setting its bit in `openFaces` (bit 2*axis = minus face,
+// bit 2*axis+1 = plus face) makes the sweep read the first ghost layer there instead — the caller
+// must halo-fill `f` before EVERY sweep (call with nsweeps=1 per refresh; the sweep is Jacobi, so a
+// per-sweep refresh reproduces the single-rank closed-box arithmetic bit-for-bit; flux out of one
+// block equals flux into its neighbour, so global volume conservation is preserved). Faces on the
+// GLOBAL domain boundary stay closed (bit clear) to match the validated single-rank behaviour.
+// NOTE: smooths across immersed-solid cells too — fine for the walled beds here (no inner SDF); an
+// SDF-masked variant is a follow-up.
 template <class FieldV>
-void smoothField(FieldV f, FieldV tmp, GridMap m, int nsweeps, double alpha) {
+void smoothField(FieldV f, FieldV tmp, GridMap m, int nsweeps, double alpha, int openFaces = 0) {
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g, g = m.g;
   const long sx = 1, sy = m.ex, sz = (long)m.ex * m.ey;
-  Kokkos::deep_copy(tmp, f);  // seed ghosts so an odd-count final copy-back preserves f's ghost cells
+  const bool oxm = openFaces & 1, oxp = openFaces & 2, oym = openFaces & 4, oyp = openFaces & 8,
+             ozm = openFaces & 16, ozp = openFaces & 32;
+  Kokkos::deep_copy(tmp, f);  // seed ghosts so an odd-count final copy-back preserves f's ghost
+                              // cells (and so open faces read current ghosts from either buffer)
   for (int s = 0; s < nsweeps; ++s) {
     FieldV src = (s % 2 == 0) ? f : tmp;
     FieldV dst = (s % 2 == 0) ? tmp : f;
@@ -176,13 +186,14 @@ void smoothField(FieldV f, FieldV tmp, GridMap m, int nsweeps, double alpha) {
         KOKKOS_LAMBDA(int ix, int iy, int iz) {
           const long c = (long)(ix + g) + (long)(iy + g) * sy + (long)(iz + g) * sz;
           const double v = (double)src(c);
-          double lap = 0.0;  // zero-flux: an out-of-domain neighbour contributes v (no gradient)
-          lap += (ix > 0 ? (double)src(c - sx) : v) - v;
-          lap += (ix < nx - 1 ? (double)src(c + sx) : v) - v;
-          lap += (iy > 0 ? (double)src(c - sy) : v) - v;
-          lap += (iy < ny - 1 ? (double)src(c + sy) : v) - v;
-          lap += (iz > 0 ? (double)src(c - sz) : v) - v;
-          lap += (iz < nz - 1 ? (double)src(c + sz) : v) - v;
+          double lap = 0.0;  // zero-flux: an out-of-domain neighbour contributes v (no gradient),
+                             // unless that face is an open (rank-boundary) face — then read the ghost
+          lap += (ix > 0 || oxm ? (double)src(c - sx) : v) - v;
+          lap += (ix < nx - 1 || oxp ? (double)src(c + sx) : v) - v;
+          lap += (iy > 0 || oym ? (double)src(c - sy) : v) - v;
+          lap += (iy < ny - 1 || oyp ? (double)src(c + sy) : v) - v;
+          lap += (iz > 0 || ozm ? (double)src(c - sz) : v) - v;
+          lap += (iz < nz - 1 || ozp ? (double)src(c + sz) : v) - v;
           dst(c) = (typename FieldV::value_type)(v + alpha * lap);
         });
   }
