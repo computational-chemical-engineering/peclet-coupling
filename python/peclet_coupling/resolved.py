@@ -29,9 +29,25 @@ instance array is a few hundred bytes per grain against a geometry rebuild measu
 UNITS. Everything is in flow's grid units: cell spacing 1, cell (i,j,k) centred at (i,j,k), so dem
 positions and radii must be expressed in cells.
 
-NOT SUPPORTED IN v1: hydrodynamic TORQUE is computed and reported but not applied -- dem's host API
-takes an external force, not an external torque. A freely rotating resolved grain therefore needs a
-dem-side addition; see the design note.
+HYDRODYNAMIC TORQUE. dem gained `set_external_torques` (rung R2), so the loop CAN now hand the
+reaction torque over -- `apply_torque=True`. It is **off by default**, deliberately:
+
+  * The reaction FORCE is exact because the per-cell -grad(pi) telescopes over an owner region to
+    the region-boundary flux plus the wall pressure force. That argument does NOT carry to the
+    FIRST MOMENT: sum r x grad(pi) over the region does not telescope the same way, so the reported
+    torque is not yet established as the physical hydrodynamic torque. On a translating sphere,
+    where the true torque is exactly zero, it reads |T|/(|F| R) = 3.2e-07 -- small, but three
+    orders above the traction integral's 5.0e-14 on the same run, i.e. it is at its own round-off
+    floor and has never been checked against a case with a genuinely nonzero torque. The Jeffery
+    orbit of an ellipsoid in shear is that check; until it exists, applying this torque is not a
+    validated operation.
+  * dem assigns a DEFAULT inverse inertia that has nothing to do with the grain's size. Handing a
+    torque to a grain whose inertia was never set therefore spins it up at an arbitrary rate; the
+    settling gate diverges to 1e+09 within 600 steps that way. Set a physical principal inertia
+    (`set_inv_inertia`, e.g. from `scene_particle`'s `inv_inertia_unit`, or 2/5 m R^2 for a sphere)
+    BEFORE turning this on.
+
+The torque is computed and reported through `torques()` either way.
 """
 import numpy as np
 
@@ -39,7 +55,7 @@ import numpy as np
 class ResolvedCfdDem:
     def __init__(self, flow, dem, *, radius, mu, rho_f, fluid_dt, dem_substeps=20,
                  periodic=True, gravity=(0.0, 0.0, 0.0), rho_p=None, move=True,
-                 buoyancy=True,
+                 buoyancy=True, apply_torque=False,
                  force_method="reaction"):
         self.flow = flow
         self.dem = dem
@@ -54,6 +70,10 @@ class ResolvedCfdDem:
         self.radius = float(radius)
         self.rho_p = float(rho_p) if rho_p is not None else None
         self.periodic = bool(periodic)
+        # Hand the reaction TORQUE to dem as well as the force (dem R2, set_external_torques).
+        # OFF by default -- see the class docstring: the torque is not yet validated as the
+        # physical hydrodynamic torque, and dem's default inverse inertia is not the grain's.
+        self.apply_torque = bool(apply_torque)
         # "reaction" (default): the discrete-reaction force -- exactly conservative (the momentum
         # the fluid lost IS the momentum the grain gains) and as accurate as the flow solution it
         # sustains. "traction": the reconstructed surface integral, kept as a diagnostic; it
@@ -142,6 +162,11 @@ class ResolvedCfdDem:
             V = 4.0 / 3.0 * np.pi * self.radius**3
             F += self.rho_p * V * self.gravity
         self.dem.set_external_forces(np.ascontiguousarray(F, dtype=np.float32))
+        if self.apply_torque:
+            # World-frame torque; dem rotates it into the body frame in the predictor. Held
+            # constant over the sub-steps, exactly like the force.
+            self.dem.set_external_torques(
+                np.ascontiguousarray(self.last_torque, dtype=np.float32))
         for _ in range(self.dem_substeps):
             # dt MUST be passed explicitly. dem's step(dt=0) is a dynamics-free relaxation step
             # (overlap removal only), so step() with no argument advances nothing and the driver
