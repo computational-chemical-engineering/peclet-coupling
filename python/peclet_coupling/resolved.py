@@ -1,0 +1,136 @@
+"""ResolvedCfdDem -- resolved (geometry-resolving) CFD-DEM.
+
+Layer 4 of suite/docs/ANALYTIC_SDF_GEOMETRY.md. Where `CfdDem` treats a grain as a point with a
+drag closure, this driver makes each grain an ANALYTIC SDF INSTANCE in the flow solver's scene: the
+fluid resolves the actual surface, no-slip is enforced on the moving wall by the cut-cell IBM
+(Layer 3 rung 2), the projection carries the wall's own volume flux (rung 3), and the coupling is a
+SURFACE-TRACTION exchange (rung L4-R2) with no drag correlation anywhere in it.
+
+Python-composed, like `CfdDem` and for the same reason: dem and flow stay separate method codes and
+nothing links them in C++. Per coupling step:
+
+  1. pull dem state (positions / quaternions / velocities / angular velocities) and push it into
+     flow's scene -- instance transforms plus rung-2 rigid-body motion;
+  2. flow.rebuild_geometry() -- re-derive SDF, cut-cell overlay, apertures and pressure operator;
+     the velocity and pressure fields survive it;
+  3. flow.step();
+  4. flow.hydro_force_torque() -> per-grain force; add gravity/buoyancy; hand to dem;
+  5. dem sub-steps at the DEM timestep, holding the fluid force constant.
+
+WEAK, EXPLICIT COUPLING (spec: L4-R3). The fluid force is lagged by one fluid step. That is the
+documented v1; a strongly-coupled variant would iterate 3-5 inside the step.
+
+FLOAT/DOUBLE BOUNDARY. dem carries float32 state, flow's scene is float64. The per-step instance
+rebuild converts; "zero-copy" is not literal across that divide, and does not need to be -- the
+instance array is a few hundred bytes per grain against a geometry rebuild measured in tens of ms.
+
+UNITS. Everything is in flow's grid units: cell spacing 1, cell (i,j,k) centred at (i,j,k), so dem
+positions and radii must be expressed in cells.
+
+NOT SUPPORTED IN v1: hydrodynamic TORQUE is computed and reported but not applied -- dem's host API
+takes an external force, not an external torque. A freely rotating resolved grain therefore needs a
+dem-side addition; see the design note.
+"""
+import numpy as np
+
+
+class ResolvedCfdDem:
+    def __init__(self, flow, dem, *, radius, mu, rho_f, fluid_dt, dem_substeps=20,
+                 periodic=True, gravity=(0.0, 0.0, 0.0), rho_p=None, move=True,
+                 buoyancy=True):
+        self.flow = flow
+        self.dem = dem
+        self.mu = float(mu)
+        self.rho_f = float(rho_f)
+        self.fluid_dt = float(fluid_dt)
+        self.dem_substeps = int(dem_substeps)
+        self.dt_dem = self.fluid_dt / self.dem_substeps
+        self.gravity = np.asarray(gravity, dtype=np.float64)
+        self.move = bool(move)
+        self.buoyancy = bool(buoyancy)
+        self.radius = float(radius)
+        self.rho_p = float(rho_p) if rho_p is not None else None
+        self.periodic = bool(periodic)
+        self.n = int(dem.num_particles())
+        self.last_force = np.zeros((self.n, 3))
+        self.last_torque = np.zeros((self.n, 3))
+        flow.set_dt(self.fluid_dt)
+        dem.set_dt(self.dt_dem)   # kept in sync, though step(dt) below passes it explicitly
+        self._install_scene()
+
+    # --- L4-R1: the dem -> scene bridge --------------------------------------------------------
+    _KN_R, _KI_I, _KI_R = 16, 2, 17
+
+    def _install_scene(self):
+        """One kSphere node, one instance per grain. Spheres first, per the spec; a shaped grain is
+        the same bridge with the grain's own node tree in place of the sphere leaf."""
+        node_ints = np.array([1, -1, -1], dtype=np.int32)          # kSphere
+        node_reals = np.zeros(self._KN_R)
+        node_reals[0] = self.radius
+        node_reals[14] = 1.0                                       # quaternion w
+        node_reals[15] = 1.0                                       # scale
+        ii, ir = self._instance_arrays()
+        self.flow.set_scene(node_ints, node_reals, ii.ravel(), ir.ravel(), periodic=self.periodic)
+        self._push_motion()
+        self.flow.set_solid_from_scene(True)
+
+    def _instance_arrays(self):
+        pos = np.asarray(self.dem.get_positions(), dtype=np.float64)
+        quat = np.asarray(self.dem.get_quaternions(), dtype=np.float64)
+        ii = np.zeros((self.n, self._KI_I), dtype=np.int32)
+        ir = np.zeros((self.n, self._KI_R))
+        ii[:, 0] = 0        # shapeRoot
+        ii[:, 1] = -1       # materialId
+        ir[:, 0:3] = pos[:, 0:3]
+        ir[:, 3:7] = quat[:, 0:4]   # (x,y,z,w)
+        ir[:, 7] = 1.0              # scale
+        return ii, ir
+
+    def _push_motion(self):
+        """Instance transforms + rigid-body velocities, straight from dem state."""
+        pos = np.asarray(self.dem.get_positions(), dtype=np.float64)
+        quat = np.asarray(self.dem.get_quaternions(), dtype=np.float64)
+        vel = np.asarray(self.dem.get_velocities(), dtype=np.float64)
+        omg = np.asarray(self.dem.get_angular_velocities(), dtype=np.float64)
+        for i in range(self.n):
+            self.flow.set_instance_transform(i, pos[i, 0:3].tolist(), quat[i, 0:4].tolist())
+            self.flow.set_instance_motion(i, lin_vel=vel[i, 0:3].tolist(),
+                                          ang_vel=omg[i, 0:3].tolist())
+
+    # --- L4-R3: the motion loop ----------------------------------------------------------------
+    def step(self):
+        if self.move:
+            self._push_motion()
+            self.flow.rebuild_geometry()
+        self.flow.step()
+        ft = np.asarray(self.flow.hydro_force_torque())   # (4, n, 3): F, tau, F_pressure, F_visc
+        self.last_force = np.array(ft[0][: self.n], dtype=np.float64)
+        self.last_torque = np.array(ft[1][: self.n], dtype=np.float64)
+        self.last_force_pressure = np.array(ft[2][: self.n], dtype=np.float64)
+        self.last_force_viscous = np.array(ft[3][: self.n], dtype=np.float64)
+        if not self.move:
+            return
+        F = self.last_force.copy()
+        if self.buoyancy and self.rho_p is not None:
+            # The resolved traction already contains the hydrostatic part of the pressure field, so
+            # what is added here is only the BODY force on the grain itself. Net gravity on a grain
+            # of density rho_p displacing rho_f is (rho_p - rho_f) V g when the fluid carries the
+            # hydrostatic gradient; when it does not (the usual periodic set-up, no gravity in the
+            # fluid), the full rho_p V g applies. buoyancy=False selects the latter.
+            V = 4.0 / 3.0 * np.pi * self.radius**3
+            F += (self.rho_p - self.rho_f) * V * self.gravity
+        elif self.rho_p is not None:
+            V = 4.0 / 3.0 * np.pi * self.radius**3
+            F += self.rho_p * V * self.gravity
+        self.dem.set_external_forces(np.ascontiguousarray(F, dtype=np.float32))
+        for _ in range(self.dem_substeps):
+            # dt MUST be passed explicitly. dem's step(dt=0) is a dynamics-free relaxation step
+            # (overlap removal only), so step() with no argument advances nothing and the driver
+            # would run happily with a frozen particle.
+            self.dem.step(self.dt_dem)
+
+    def forces(self):
+        return self.last_force
+
+    def torques(self):
+        return self.last_torque
