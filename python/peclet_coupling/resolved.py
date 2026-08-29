@@ -3,8 +3,10 @@
 Layer 4 of suite/docs/ANALYTIC_SDF_GEOMETRY.md. Where `CfdDem` treats a grain as a point with a
 drag closure, this driver makes each grain an ANALYTIC SDF INSTANCE in the flow solver's scene: the
 fluid resolves the actual surface, no-slip is enforced on the moving wall by the cut-cell IBM
-(Layer 3 rung 2), the projection carries the wall's own volume flux (rung 3), and the coupling is a
-SURFACE-TRACTION exchange (rung L4-R2) with no drag correlation anywhere in it.
+(Layer 3 rung 2), the projection carries the wall's own volume flux (rung 3), and the coupling is a hydrodynamic-load exchange (rung L4-R2) with no drag correlation anywhere in it:
+by default the DISCRETE REACTION (route (b) of the design note's OPEN FOR REVIEW 1) -- the momentum
+the fluid actually lost to each grain, exactly conservative -- with the reconstructed traction
+integral available as force_method="traction" for diagnostics.
 
 Python-composed, like `CfdDem` and for the same reason: dem and flow stay separate method codes and
 nothing links them in C++. Per coupling step:
@@ -37,7 +39,8 @@ import numpy as np
 class ResolvedCfdDem:
     def __init__(self, flow, dem, *, radius, mu, rho_f, fluid_dt, dem_substeps=20,
                  periodic=True, gravity=(0.0, 0.0, 0.0), rho_p=None, move=True,
-                 buoyancy=True):
+                 buoyancy=True,
+                 force_method="reaction"):
         self.flow = flow
         self.dem = dem
         self.mu = float(mu)
@@ -51,6 +54,15 @@ class ResolvedCfdDem:
         self.radius = float(radius)
         self.rho_p = float(rho_p) if rho_p is not None else None
         self.periodic = bool(periodic)
+        # "reaction" (default): the discrete-reaction force -- exactly conservative (the momentum
+        # the fluid lost IS the momentum the grain gains) and as accurate as the flow solution it
+        # sustains. "traction": the reconstructed surface integral, kept as a diagnostic; it
+        # under-reads the drag by a resolution-independent ~29% (measured), which in this loop
+        # shows up as a total-momentum leak. See suite/docs/ANALYTIC_SDF_GEOMETRY.md OPEN FOR
+        # REVIEW 1.
+        if force_method not in ("reaction", "traction"):
+            raise ValueError("force_method must be 'reaction' or 'traction'")
+        self.force_method = force_method
         self.n = int(dem.num_particles())
         self.last_force = np.zeros((self.n, 3))
         self.last_torque = np.zeros((self.n, 3))
@@ -103,11 +115,18 @@ class ResolvedCfdDem:
             self._push_motion()
             self.flow.rebuild_geometry()
         self.flow.step()
-        ft = np.asarray(self.flow.hydro_force_torque())   # (4, n, 3): F, tau, F_pressure, F_visc
-        self.last_force = np.array(ft[0][: self.n], dtype=np.float64)
-        self.last_torque = np.array(ft[1][: self.n], dtype=np.float64)
-        self.last_force_pressure = np.array(ft[2][: self.n], dtype=np.float64)
-        self.last_force_viscous = np.array(ft[3][: self.n], dtype=np.float64)
+        if self.force_method == "reaction":
+            ft = np.asarray(self.flow.hydro_force_torque_reaction())   # (2, n, 3): F, tau
+            self.last_force = np.array(ft[0][: self.n], dtype=np.float64)
+            self.last_torque = np.array(ft[1][: self.n], dtype=np.float64)
+            self.last_force_pressure = None   # the reaction has no pressure/viscous split
+            self.last_force_viscous = None
+        else:
+            ft = np.asarray(self.flow.hydro_force_torque())   # (4, n, 3): F, tau, F_p, F_visc
+            self.last_force = np.array(ft[0][: self.n], dtype=np.float64)
+            self.last_torque = np.array(ft[1][: self.n], dtype=np.float64)
+            self.last_force_pressure = np.array(ft[2][: self.n], dtype=np.float64)
+            self.last_force_viscous = np.array(ft[3][: self.n], dtype=np.float64)
         if not self.move:
             return
         F = self.last_force.copy()
