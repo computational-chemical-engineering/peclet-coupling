@@ -29,25 +29,20 @@ instance array is a few hundred bytes per grain against a geometry rebuild measu
 UNITS. Everything is in flow's grid units: cell spacing 1, cell (i,j,k) centred at (i,j,k), so dem
 positions and radii must be expressed in cells.
 
-HYDRODYNAMIC TORQUE. dem gained `set_external_torques` (rung R2), so the loop CAN now hand the
-reaction torque over -- `apply_torque=True`. It is **off by default**, deliberately:
+HYDRODYNAMIC TORQUE (validated 2026-08-31). flow's reaction torque now carries the
+transposed-stress wall term (flow `16e91ec`) and is GATED: a spinning sphere reproduces the exact
+Stokes torque 8*pi*mu*a^3*Omega to +3.5/+2.4/+2.2% (converging with the aperture first moment),
+and THIS loop with apply_torque=True decays a freely spinning sphere at 1.039x the same box's
+calibrated rotational drag (rotation_gate.py part B). Before that term the torque was a structural
+-31% -- the missing traction mu*(n x Omega) integrates to zero in the FORCE, which is why no
+force-based gate ever saw it.
 
-  * The reaction FORCE is exact because the per-cell -grad(pi) telescopes over an owner region to
-    the region-boundary flux plus the wall pressure force. That argument does NOT carry to the
-    FIRST MOMENT: sum r x grad(pi) over the region does not telescope the same way, so the reported
-    torque is not yet established as the physical hydrodynamic torque. On a translating sphere,
-    where the true torque is exactly zero, it reads |T|/(|F| R) = 3.2e-07 -- small, but three
-    orders above the traction integral's 5.0e-14 on the same run, i.e. it is at its own round-off
-    floor and has never been checked against a case with a genuinely nonzero torque. The Jeffery
-    orbit of an ellipsoid in shear is that check; until it exists, applying this torque is not a
-    validated operation.
-  * dem assigns a DEFAULT inverse inertia that has nothing to do with the grain's size. Handing a
-    torque to a grain whose inertia was never set therefore spins it up at an arbitrary rate; the
-    settling gate diverges to 1e+09 within 600 steps that way. Set a physical principal inertia
-    (`set_inv_inertia`, e.g. from `scene_particle`'s `inv_inertia_unit`, or 2/5 m R^2 for a sphere)
-    BEFORE turning this on.
+apply_torque stays **off by default** for one remaining reason: dem assigns a DEFAULT inverse
+inertia unrelated to the grain's size, so handing a torque to a grain whose inertia was never set
+spins it up at an arbitrary rate (the settling gate diverged to 1e+09 that way). Set the physical
+principal inertia FIRST -- (2/5) m R^2 for a sphere, or `scene_particle`'s `inv_inertia_unit` --
+then enable. The torque is computed and reported through `torques()` either way.
 
-The torque is computed and reported through `torques()` either way.
 """
 import numpy as np
 
@@ -71,8 +66,9 @@ class ResolvedCfdDem:
         self.rho_p = float(rho_p) if rho_p is not None else None
         self.periodic = bool(periodic)
         # Hand the reaction TORQUE to dem as well as the force (dem R2, set_external_torques).
-        # OFF by default -- see the class docstring: the torque is not yet validated as the
-        # physical hydrodynamic torque, and dem's default inverse inertia is not the grain's.
+        # The torque is VALIDATED (rotating-sphere + spin-decay gates, see the class docstring);
+        # off by default only because dem's default inverse inertia is not the grain's -- set a
+        # physical principal inertia first, then enable.
         self.apply_torque = bool(apply_torque)
         # "reaction" (default): the discrete-reaction force -- exactly conservative (the momentum
         # the fluid lost IS the momentum the grain gains) and as accurate as the flow solution it
