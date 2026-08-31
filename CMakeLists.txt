@@ -32,6 +32,9 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/__init__.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/coupling/__init__.py COPYONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/driver.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/coupling/driver.py COPYONLY)
+# resolved.py is imported by __init__.py, so omitting it makes a dev build unimportable.
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/resolved.py
+               ${CMAKE_CURRENT_BINARY_DIR}/peclet/coupling/resolved.py COPYONLY)
 target_include_directories(coupling PRIVATE src "${CORE_INC}")
 target_link_libraries(coupling PRIVATE Kokkos::kokkos)
 if(Kokkos_ENABLE_HIP)
@@ -45,12 +48,13 @@ if(PECLET_COUPLING_TESTS)
 endif()
 
 # --- pip / scikit-build-core install rule --------------------------------------------------------
-# Places the extension + the peclet/coupling package (__init__.py + driver.py) into the PEP-420
+# Places the extension + the peclet/coupling package (__init__.py + driver.py + resolved.py) into the PEP-420
 # peclet namespace. In an sdist build the core headers + nanobind come from PecletDeps (fetched at
 # the pinned tag), so the source distribution is self-contained.
 if(DEFINED SKBUILD)
   install(TARGETS coupling LIBRARY DESTINATION peclet/coupling COMPONENT python)
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/__init__.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/driver.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/resolved.py
           DESTINATION peclet/coupling COMPONENT python)
 endif()
