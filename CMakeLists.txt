@@ -39,6 +39,11 @@ target_include_directories(coupling PRIVATE src "${CORE_INC}")
 target_link_libraries(coupling PRIVATE Kokkos::kokkos)
 if(Kokkos_ENABLE_HIP)
   target_link_options(coupling PRIVATE -Wl,--no-gc-sections)
+  # HIP/lld experiment 1 (docs/RELEASE.md §8): nanobind sets CXX_VISIBILITY_PRESET hidden, and under hipcc
+  # the host objects then reference the Kokkos SharedAllocationRecord / shared_ptr control-block vtables
+  # as hidden symbols that nothing defines ("undefined hidden symbol: vtable for ..."). Default visibility
+  # on the HIP path only; CUDA/OpenMP builds are untouched.
+  set_target_properties(coupling PROPERTIES CXX_VISIBILITY_PRESET default)
 endif()
 
 option(PECLET_COUPLING_TESTS "Register the Python CFD-DEM integration tests as ctests" OFF)
