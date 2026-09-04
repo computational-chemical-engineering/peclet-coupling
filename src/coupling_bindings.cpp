@@ -6,8 +6,12 @@
 /// so a coupled run never links the two solvers in C++ — the Python CfdDem driver composes them.
 /// Particle arrays are float32 (dem SoA precision), grid fields float64 (flow field precision); each
 /// array is wrapped as an unmanaged Kokkos View over the SAME memory (zero-copy on host and, for
-/// DLPack device arrays on a GPU build, on device). Kokkos is initialised at import; the arrays are
-/// borrowed (owned by the caller), so there is nothing to release at exit.
+/// DLPack device arrays on a GPU build, on device). The arrays are borrowed (owned by the caller),
+/// so this module owns no Kokkos Views and its teardown registry stays empty; it still follows the
+/// suite-wide pattern of peclet/core/python/kokkos_teardown.hpp (Kokkos initialised at import, one
+/// atexit hook that releases and THEN finalizes -- required on CUDA, where a Kokkos left to its
+/// static destructors aborts with cudaErrorCudartUnloading after the runtime unloads -- plus
+/// `finalize()` and `execution_space`).
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 
@@ -15,6 +19,7 @@
 #include <stdexcept>
 
 #include "coupling_kernels.hpp"
+#include "peclet/core/python/kokkos_teardown.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
 
 namespace nb = nanobind;
@@ -64,8 +69,9 @@ GridMap gmap(double ox, double oy, double oz, double h, int ex, int ey, int ez, 
 
 NB_MODULE(_coupling, m) {
   m.doc() = "CFD-DEM coupling kernels (deposition, drag, momentum feedback) on shared arrays.";
-  if (!Kokkos::is_initialized())
-    Kokkos::initialize();
+  // Kokkos init + the release-then-finalize atexit hook + finalize() + execution_space (the
+  // suite-wide teardown pattern; see the file comment).
+  peclet::core::python::install(m);
 
   m.def(
       "deposit_solid_volume",
