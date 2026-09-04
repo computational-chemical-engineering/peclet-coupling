@@ -32,7 +32,14 @@ DRAG_GIDASPOW = 5  # Ergun (dense) + Wen & Yu (dilute), switched at eps = 0.8
 DRAG_BEETSTRA = 6  # Beetstra-van der Hoef-Kuipers (2007) DNS drag — the published "BVK2"
 DRAG_TANG = 7      # Tang et al. (2015) DNS drag — what MFIX-Exa's "BVK2" option actually executes
 
-__version__ = "0.2.0"
+# The installed distribution's metadata (pyproject.toml) is the single source of truth for the version;
+# a build-tree import (PYTHONPATH=<build>) has no metadata and reports "0+unknown". This replaces a
+# hand-maintained literal that had drifted behind pyproject.toml in every package at 0.6.0.
+try:
+    from importlib.metadata import version as _dist_version
+    __version__ = _dist_version("peclet-coupling")
+except Exception:  # PackageNotFoundError (dev build), or a broken metadata install
+    __version__ = "0+unknown"
 
 __all__ = ["CfdDem", "ResolvedCfdDem", "_coupling", "DRAG_STOKES", "DRAG_SCHILLER_NAUMANN", "DRAG_ERGUN",
            "DRAG_DI_FELICE", "DRAG_WEN_YU", "DRAG_GIDASPOW", "DRAG_BEETSTRA", "DRAG_TANG"]
