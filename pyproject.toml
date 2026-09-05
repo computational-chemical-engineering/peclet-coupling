@@ -16,7 +16,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "peclet-coupling"
-version = "0.3.0"
+version = "0.4.0"
 description = "peclet.coupling — unresolved point-particle CFD-DEM coupling of peclet.flow + peclet.dem"
 readme = "README.md"
 requires-python = ">=3.10"

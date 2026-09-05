@@ -16,7 +16,7 @@ include(FetchContent)
 
 set(PECLET_KOKKOS_TAG "5.1.1" CACHE STRING "Vendored Kokkos git tag")
 set(PECLET_ARBORX_TAG "v2.1"  CACHE STRING "Vendored ArborX git tag")
-set(PECLET_TPX_TAG    "v0.5.0"  CACHE STRING "Vendored core git tag (headers)")
+set(PECLET_TPX_TAG    "v0.6.0"  CACHE STRING "Vendored core git tag (headers)")
 set(PECLET_MORTON_TAG "v0.2.1"  CACHE STRING "Vendored morton git tag (headers)")
 option(PECLET_VENDOR_DEPS "Force FetchContent-build of Kokkos/ArborX/siblings (self-contained wheel)" OFF)
 
