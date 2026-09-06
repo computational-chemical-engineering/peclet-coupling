@@ -1,8 +1,11 @@
 """CfdDem — unresolved point-particle CFD-DEM driver.
 
-Composes a peclet.flow.Solver (Eulerian fluid, grid units: unit spacing, origin 0, cell i centred at
-i+0.5) and a peclet.dem.Simulation (Lagrangian particles, positions in the SAME grid coordinates).
-Each fluid step:
+Composes a peclet.flow.Solver (the Eulerian fluid) and a peclet.dem.Simulation (Lagrangian
+particles). BOTH LIVE IN THE SAME PHYSICAL COORDINATES: the driver takes the cell size and the lower
+corner from the flow solver itself (`flow.get_spacing()` / `flow.origin`), so a solver built with
+`Solver(cells, extent=...)` couples to a DEM stated in metres with no conversion anywhere, and a
+solver built the old way (no extent) keeps the historical cell units — spacing 1, origin 0, cell i
+centred at i + 1/2 — bit for bit. Each fluid step:
 
   1. deposit particle volumes -> void fraction eps (trilinear, periodic-folded);
   2. gather the fluid velocity + eps at each particle, evaluate the drag law -> per-particle drag
@@ -25,7 +28,7 @@ def _sl(axis, idx):
 
 class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
-                 dem_substeps=20, eps_min=0.25, smooth_width=0.0, periodic=(True, True, True), h=1.0,
+                 dem_substeps=20, eps_min=0.25, smooth_width=0.0, periodic=(True, True, True), h=None,
                  move_particles=True, implicit_drag=True, porous=True, advection=True,
                  gravity=(0.0, 0.0, 0.0)):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
@@ -33,6 +36,45 @@ class CfdDem:
         self._c = _coupling
         self.flow = flow
         self.dem = dem
+        # THE UNIT LAYER (suite/docs/PHYSICAL_UNITS_PLAN.md §3.2). The flow solver computes on the
+        # UNIT LATTICE and folds the metric into constants at its own API boundary — but the arrays
+        # this driver reaches through the RAW field registry (field_view: u/v/w, force_*,
+        # drag_beta) are the internal ones, not the converted get_u/get_p. So the driver poses the
+        # WHOLE coupling in the solver's internal units: particle positions become index
+        # coordinates, velocities index velocities, mu/rho/gravity/dt the solver's own, and the
+        # per-particle drag force comes back to the caller's units before it reaches dem. On a
+        # cell-unit solver every factor below is exactly 1.0, `_u_id` is True, and the zero-copy
+        # views are handed through untouched — bit for bit the pre-refactor driver.
+        us = getattr(flow, "unit_scales", None)
+        if us is None:  # a flow build older than the physical-domains release
+            us = {"identity": True, "h_ref": 1.0, "rho_ref": 1.0, "t_ref": 1.0,
+                  "length_to_internal": 1.0, "velocity_to_internal": [1.0, 1.0, 1.0],
+                  "time_to_internal": 1.0, "density_to_internal": 1.0,
+                  "viscosity_to_internal": 1.0, "force_to_physical": 1.0}
+        self._us = us
+        self._u_id = bool(us["identity"])
+        self._k_len = float(us["length_to_internal"])          # physical length -> cells
+        self._k_vel = float(us["velocity_to_internal"][0])     # isotropic in Phase 1
+        self._k_time = float(us["time_to_internal"])
+        self._k_mass = float(us["rho_ref"]) * float(us["h_ref"]) ** 3   # physical mass -> internal
+        self._k_acc = float(us["t_ref"]) ** 2 / float(us["h_ref"])      # acceleration -> internal
+        self._k_force_out = float(us["force_to_physical"])     # internal total force -> physical
+        # The cell size comes from the fluid solver, never from the caller: `h=None` (the default)
+        # reads flow.get_spacing(), which is 1 on a cell-unit solver and extent/cells on a physical
+        # one. An explicit `h` still wins, so every pre-existing call is unchanged.
+        if h is None:
+            sp = [float(v) for v in flow.get_spacing()]
+            if max(abs(v - sp[0]) for v in sp) > 1e-12 * abs(sp[0]):
+                raise ValueError(
+                    "CfdDem: the deposit/gather map assumes cubic cells, but the flow solver's "
+                    f"spacing is {sp}. Anisotropic cells are Phase 2 of the physical-domains plan.")
+            h = sp[0]
+        self.h = float(h)
+        self.inv_vcell = 1.0 / (self.h ** 3)   # PHYSICAL 1/cell-volume (diagnostics)
+        # The kernels run in the solver's internal units (see THE UNIT LAYER above): a cell's index
+        # volume is 1, mu and rho are the solver's own, gravity is an index acceleration and the
+        # exchange interval an index time. All five are today's numbers on the cell-unit path.
+        self._inv_vcell_i = 1.0
         # Backend: the coupling kernels run on flow's Kokkos execution space. On a GPU build the
         # arrays they touch must be device-resident, so we array-program through CuPy (device) or
         # NumPy (host); grid fields + particle state are taken zero-copy via DLPack.
@@ -47,6 +89,8 @@ class CfdDem:
         self.mu = float(mu)
         self.rho = float(rho)
         self.fluid_dt = float(fluid_dt)
+        self._mu_i = self.mu * float(self._us["viscosity_to_internal"])
+        self._rho_i = self.rho * float(self._us["density_to_internal"])
         self.dem_substeps = int(dem_substeps)
         self.dt_dem = self.fluid_dt / self.dem_substeps
         # Void-fraction floor (default 0.25): a PHYSICAL regularisation, not just a guard. Real
@@ -64,14 +108,14 @@ class CfdDem:
         self.smooth_width = float(smooth_width)
         # Volume-averaging validity: eps must be smooth over >~ the particle scale. With cells not
         # much larger than d_p the raw trilinear deposit is not a proper volume filter — smooth it.
-        if np.isscalar(radius) and float(h) < 3.0 * (2.0 * float(radius)) \
-                and self.smooth_width * float(h) < 1.5 * (2.0 * float(radius)):
+        if np.isscalar(radius) and self.h < 3.0 * (2.0 * float(radius)) \
+                and self.smooth_width * self.h < 1.5 * (2.0 * float(radius)):
             import warnings
             warnings.warn(
-                f"CfdDem: cell size h={float(h):g} is < 3 particle diameters and smooth_width is "
+                f"CfdDem: cell size h={self.h:g} is < 3 particle diameters and smooth_width is "
                 f"below ~1.5 d_p — the deposited void fraction is not a proper volume average at "
                 f"this resolution. Set smooth_width so the smoothing length exceeds the particle "
-                f"diameter (e.g. smooth_width={1.5 * 2.0 * float(radius) / float(h):.1f}).")
+                f"diameter (e.g. smooth_width={1.5 * 2.0 * float(radius) / self.h:.1f}).")
         self._smooth_alpha = 1.0 / 6.0
         self._smooth_sweeps = (max(1, int(round(self.smooth_width ** 2 / (2.0 * self._smooth_alpha))))
                                if self.smooth_width > 0.0 else 0)
@@ -84,8 +128,6 @@ class CfdDem:
         # solves plain incompressible NS (eps only in the drag): a cheaper approximation for
         # dilute/steady beds, not a faithful CFD-DEM.
         self.porous = bool(porous)
-        self.h = float(h)
-        self.inv_vcell = 1.0 / (self.h ** 3)
         # Constant external acceleration dem applies per substep (its set_gravity vector; dem has
         # no getter, so pass it here too). Feeds the stiff-safe drag cap's gravity-exact correction
         # F -= m g (1 - beta_eff/beta), which restores the physical steady-state slip m g / beta.
@@ -115,8 +157,9 @@ class CfdDem:
                 self.mpi = MPI.COMM_WORLD.Get_size() > 1
         except Exception:
             self.mpi = False
+        self._org = [float(v) for v in getattr(flow, "origin", (0.0, 0.0, 0.0))]
         bo = flow.block_origin() if self.mpi else (0, 0, 0)
-        self._ox, self._oy, self._oz = bo[0] * self.h, bo[1] * self.h, bo[2] * self.h
+        self._setBlockOrigin(bo)
         gnx, gny, gnz = flow.global_resolution() if self.mpi else (nx, ny, nz)
         self.gnx, self.gny, self.gnz = gnx, gny, gnz
         # Smoothing under MPI: a local block face that is an INTERIOR rank boundary is not a wall —
@@ -179,18 +222,31 @@ class CfdDem:
         self.dem.set_dt(self.dt_dem)
         N = dem.num_particles()  # this rank's OWNED count under MPI
         self._N = N
-        self._radius0 = float(radius) if np.isscalar(radius) else None  # scalar => resizable per-rank
-        self._rad = (xp.full(N, radius, dtype=xp.float32) if np.isscalar(radius)
-                     else xp.asarray(np.ascontiguousarray(radius, dtype=np.float32)))
+        # Radii, like every other length here, are handed to the kernels in CELLS.
+        kl = self._k_len
+        self._radius0 = float(radius) * kl if np.isscalar(radius) else None
+        self._rad = (xp.full(N, float(radius) * kl, dtype=xp.float32) if np.isscalar(radius)
+                     else xp.asarray(np.ascontiguousarray(np.asarray(radius) * kl,
+                                                          dtype=np.float32)))
         self._fdrag = xp.zeros((N, 3), dtype=xp.float32)
         self._ufluid = xp.zeros((N, 3), dtype=xp.float32)
         self._last_slip = None
         self.last_eps = None
 
-    # (self._ox,_oy,_oz) shifts the deposit so global particle coords land in the local block
-    # (== 0 single-rank). The grid map the coupling kernels take.
+    def _setBlockOrigin(self, bo):
+        """This block's physical lower corner, and the same offset in CELLS (which the domain-ghost
+        fold/fill index with). Kept together so the two can never disagree."""
+        self._blo = (int(bo[0]), int(bo[1]), int(bo[2]))
+        self._ox = self._org[0] + bo[0] * self.h
+        self._oy = self._org[1] + bo[1] * self.h
+        self._oz = self._org[2] + bo[2] * self.h
+
+    # The grid map the coupling kernels take, in the solver's INDEX coordinates: the block's cell
+    # offset and a unit spacing. On the cell-unit path those are exactly today's numbers
+    # (self._blo == flow.block_origin(), spacing 1), so nothing moves.
     def _gm(self):
-        return (self._ox, self._oy, self._oz, self.h, self.ex, self.ey, self.ez, self.g)
+        return (float(self._blo[0]), float(self._blo[1]), float(self._blo[2]), 1.0,
+                self.ex, self.ey, self.ez, self.g)
 
     # Size the per-particle scratch to the current owned count (constant single-rank / fixed bed;
     # changes across a rebalance — needs a scalar radius to re-broadcast).
@@ -218,6 +274,11 @@ class CfdDem:
         else:
             pos = np.ascontiguousarray(self.dem.get_positions(), dtype=np.float32)
             vel = np.ascontiguousarray(self.dem.get_velocities(), dtype=np.float32)
+        if not self._u_id:
+            xp = self.xp
+            o = xp.asarray(self._org, dtype=pos.dtype)
+            pos = (pos[:, 0:3] - o) * pos.dtype.type(self._k_len)
+            vel = vel[:, 0:3] * vel.dtype.type(self._k_vel)
         return pos, vel
 
     # --- ghost handling on a padded (ex,ey,ez) buffer ----------------------------------------
@@ -242,7 +303,7 @@ class CfdDem:
         """MPI: same-side fold of the non-periodic GLOBAL-domain-boundary ghosts of the local
         block (the reverse halo never touches them). Call BEFORE exchange_field_add."""
         g = self.g
-        lo = (int(self._ox / self.h), int(self._oy / self.h), int(self._oz / self.h))
+        lo = self._blo
         dims = (self.nx, self.ny, self.nz)
         gdims = (self.gnx, self.gny, self.gnz)
         for a in range(3):
@@ -272,7 +333,7 @@ class CfdDem:
         """MPI: zero-gradient fill of the non-periodic global-domain-boundary ghosts (the halo
         fill never touches them). Call AFTER exchange_field."""
         g = self.g
-        lo = (int(self._ox / self.h), int(self._oy / self.h), int(self._oz / self.h))
+        lo = self._blo
         dims = (self.nx, self.ny, self.nz)
         gdims = (self.gnx, self.gny, self.gnz)
         for a in range(3):
@@ -314,7 +375,7 @@ class CfdDem:
                                                 self._smooth_open)
             else:
                 self._c.smooth_solid_volume(sv, *self._gm(), self._smooth_sweeps, self._smooth_alpha)
-        self._c.compute_void_fraction(sv, ep, self.inv_vcell, self.eps_min)
+        self._c.compute_void_fraction(sv, ep, self._inv_vcell_i, self.eps_min)
         if self.mpi:
             self.flow.exchange_field("eps")  # fill the ghosts the gather stencil reads
             self._fill_domain(ep)
@@ -346,20 +407,23 @@ class CfdDem:
         # effectiveBeta return the raw beta on both sides of the exchange. (This also guards against
         # dem's set_positions (N,4) convention, which remaps w==0 to inv_mass=1: "fixed" bed
         # particles otherwise look like unit-mass movers and the cap floors the dense-bed drag.)
-        dt_exch = self.fluid_dt if self.move_particles else 0.0
+        dt_exch = (self.fluid_dt * self._k_time) if self.move_particles else 0.0
+        grav_i = tuple(g * self._k_acc for g in self.gravity)
+        if not self._u_id:  # inverse mass: internal mass is m/(rho_ref*h_ref^3)
+            im = im * im.dtype.type(self._k_mass)
         # porous (volume-averaged, Model B: the fluid carries the full -grad p) converts the drag
         # closures beta_B = beta_A/eps inside the kernel (model_b flag); the incompressible mode
         # keeps the literature Model-A forms unchanged.
         if has_p and self.implicit_drag:
             self._c.compute_drag_implicit(pos, vel, self._rad, im, uf, vf, wf, self._eps, sd,
-                                          self._fdrag, db, fx, fy, fz, *gm, self.mu, self.rho,
-                                          self.inv_vcell, self.drag_kind, self.porous,
-                                          dt_exch, *self.gravity)
+                                          self._fdrag, db, fx, fy, fz, *gm, self._mu_i, self._rho_i,
+                                          self._inv_vcell_i, self.drag_kind, self.porous,
+                                          dt_exch, *grav_i)
         elif has_p:
             self._c.compute_drag_feedback(pos, vel, self._rad, im, uf, vf, wf, self._eps, sd,
-                                          self._fdrag, fx, fy, fz, *gm, self.mu, self.rho,
-                                          self.inv_vcell, self.drag_kind, self.porous,
-                                          dt_exch, *self.gravity)
+                                          self._fdrag, fx, fy, fz, *gm, self._mu_i, self._rho_i,
+                                          self._inv_vcell_i, self.drag_kind, self.porous,
+                                          dt_exch, *grav_i)
         if self.implicit_drag:
             if self.mpi:
                 self._fold_domain(db)
@@ -368,6 +432,12 @@ class CfdDem:
                 self._fold(db)
         if has_p:
             self._c.interpolate_velocity(pos, uf, vf, wf, self._ufluid, *gm)
+        # Back to the caller's units: the per-particle drag is an internal TOTAL force and
+        # _ufluid an index velocity. (Both scalings are exactly 1.0 on the cell-unit path.)
+        if not self._u_id:
+            self._fdrag *= self._fdrag.dtype.type(self._k_force_out)
+            self._ufluid *= self._ufluid.dtype.type(1.0 / self._k_vel)
+            vel = vel * vel.dtype.type(1.0 / self._k_vel)
         self._last_slip = self._ufluid - vel  # slip the drag saw; kept DEVICE-side (lazy .get on access)
         # fold the reaction feedback (force_*) onto owners: reverse halo under MPI, periodic wrap else.
         for nm, f in (("force_x", fx), ("force_y", fy), ("force_z", fz)):
@@ -436,7 +506,7 @@ class CfdDem:
         pos, _ = self._particles()
         p = pos.get() if self.device else np.asarray(pos)
         counts = np.zeros((gnx, gny, gnz), dtype=np.float64)
-        idx = np.floor(p / self.h).astype(np.int64)
+        idx = np.floor((p - np.asarray(self._org)) / self.h).astype(np.int64)
         np.clip(idx[:, 0], 0, gnx - 1, out=idx[:, 0])
         np.clip(idx[:, 1], 0, gny - 1, out=idx[:, 1])
         np.clip(idx[:, 2], 0, gnz - 1, out=idx[:, 2])
@@ -449,6 +519,6 @@ class CfdDem:
         self.dem.migrate_to_weights(w)
         # flow's block moved -> refresh the deposit-origin shift + local extents.
         bo = self.flow.block_origin()
-        self._ox, self._oy, self._oz = bo[0] * self.h, bo[1] * self.h, bo[2] * self.h
+        self._setBlockOrigin(bo)
         self.nx, self.ny, self.nz = self.flow.get_resolution()
         self.ex, self.ey, self.ez = (self.nx + 2 * self.g, self.ny + 2 * self.g, self.nz + 2 * self.g)

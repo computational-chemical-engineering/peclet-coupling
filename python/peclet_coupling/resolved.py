@@ -8,6 +8,13 @@ by default the DISCRETE REACTION (route (b) of the design note's OPEN FOR REVIEW
 the fluid actually lost to each grain, exactly conservative -- with the reconstructed traction
 integral available as force_method="traction" for diagnostics.
 
+UNITS. The bridge is a PURE IDENTITY: dem's positions, quaternions, velocities and angular
+velocities go straight into flow's scene, and the hydrodynamic force and torque come straight back,
+because a flow solver built with `Solver(cells, extent=...)` holds its scene in the caller's own
+physical coordinates and reports force and torque in the caller's units. There is no scale factor
+anywhere in this file, and on a cell-unit solver (no extent) the same identity holds with lengths
+in cells — which is what the pre-2026-09 driver silently assumed.
+
 Python-composed, like `CfdDem` and for the same reason: dem and flow stay separate method codes and
 nothing links them in C++. Per coupling step:
 
