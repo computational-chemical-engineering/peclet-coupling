@@ -28,7 +28,8 @@ def _sl(axis, idx):
 
 class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
-                 dem_substeps=20, eps_min=0.25, smooth_width=0.0, periodic=(True, True, True), h=None,
+                 dem_substeps=20, eps_min=0.25, smooth_width=0.0, smooth_length=None,
+                 periodic=(True, True, True), h=None,
                  move_particles=True, implicit_drag=True, porous=True, advection=True,
                  gravity=(0.0, 0.0, 0.0)):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
@@ -66,11 +67,23 @@ class CfdDem:
             sp = [float(v) for v in flow.get_spacing()]
             if max(abs(v - sp[0]) for v in sp) > 1e-12 * abs(sp[0]):
                 raise ValueError(
-                    "CfdDem: the deposit/gather map assumes cubic cells, but the flow solver's "
-                    f"spacing is {sp}. Anisotropic cells are Phase 2 of the physical-domains plan.")
+                    "CfdDem: the flow solver's spacing is {} — anisotropic cells. The SOLVER "
+                    "admits them (physical-domains Phases 2-3); this driver does not, and the "
+                    "reason is the particle model, not the map: an unresolved CFD-DEM particle "
+                    "has ONE radius and the drag law needs ONE Reynolds number, so posing the "
+                    "coupling on a box cell has no single length scale to reduce them to. Use a "
+                    "cubic mesh for the fluid the particles see.".format(sp))
             h = sp[0]
-        self.h = float(h)
-        self.inv_vcell = 1.0 / (self.h ** 3)   # PHYSICAL 1/cell-volume (diagnostics)
+        h = [float(v) for v in h] if hasattr(h, "__len__") else [float(h)] * 3
+        if max(abs(v - h[0]) for v in h) > 1e-12 * abs(h[0]):
+            raise ValueError(f"CfdDem: h={h} is anisotropic; see the spacing guard above.")
+        # The three spacings, in the caller's units. They are equal today (both paths above
+        # enforce it) and the code below is nevertheless written per axis, so that everything
+        # that does NOT depend on the particle model — the porosity filter, the cell volume — is
+        # already right on the day the guard lifts, and its isotropic branch is what runs now.
+        self.hvec = (h[0], h[1], h[2])
+        self.h = h[0]
+        self.inv_vcell = 1.0 / (h[0] * h[1] * h[2])   # PHYSICAL 1/cell-volume (diagnostics)
         # The kernels run in the solver's internal units (see THE UNIT LAYER above): a cell's index
         # volume is 1, mu and rho are the solver's own, gravity is an index acceleration and the
         # exchange interval an index time. All five are today's numbers on the cell-unit path.
@@ -101,24 +114,64 @@ class CfdDem:
         # keeps the Ergun/drag fidelity over the physical range (the old 0.4 clamp under-predicted
         # dense-bed drag ~3x; the interim 0.05 guard let interpenetration artifacts detonate a bed).
         self.eps_min = float(eps_min)
-        # Porosity smoothing length (grid cells), decoupled from the CFD cell size — MFIX's
-        # DES_DIFFUSE_WIDTH. 0 = off (plain trilinear deposit). For a coarse cell/dp bed set it ~1 cell
-        # (a few particle diameters) so the void fraction the drag sees is smooth and grid-independent;
-        # converted to `nsweeps` explicit diffusion sweeps (sigma = sqrt(2*alpha*nsweeps), alpha=1/6).
-        self.smooth_width = float(smooth_width)
+        # ---- POROSITY SMOOTHING: the filter width is a PHYSICAL LENGTH ------------------------
+        #
+        # MFIX's DES_DIFFUSE_WIDTH and Capecelatro & Desjardins' (2013) two-stage diffusion both
+        # define the volume filter by ONE physical width `delta_f`, set from the particle diameter
+        # (`delta_f >> d_p` is what justifies the point-particle approximation at all); the
+        # published generalisation of the method to unstructured/anisotropic meshes keeps exactly
+        # that invariant — the result converges to a Gaussian of the PRESCRIBED `delta_f` under
+        # mesh refinement. So `smooth_length` is the preferred spelling and it is a length in the
+        # caller's units.
+        #
+        # `smooth_width` (cells) is the older spelling and still works: it means cells of the
+        # FINEST axis, `smooth_length = smooth_width * min_a h_a`, which on a cubic grid is
+        # `smooth_width * h` — today's meaning exactly.
+        hv = self.hvec
+        hmin, hmax = min(hv), max(hv)
+        if smooth_length is not None:
+            self.smooth_length = float(smooth_length)
+            self.smooth_width = self.smooth_length / hmin
+        else:
+            self.smooth_width = float(smooth_width)
+            self.smooth_length = self.smooth_width * hmin
+        # `n` sweeps of the explicit Laplacian with coefficient `alpha_a` give a Gaussian of
+        # variance `sigma_a^2 = 2 alpha_a n h_a^2` along axis `a`. Equal PHYSICAL sigma on every
+        # axis therefore needs `alpha_a = C/h_a^2`, and explicit-diffusion stability
+        # (`sum_a 2 alpha_a <= 1`) caps `C = 1/(2 sum_a 1/h_a^2)`. Taking that cap:
+        #
+        #     sigma^2 = 2 C n     =>     n = sigma^2 * sum_a 1/h_a^2
+        #
+        # On a CUBIC grid `sum_a 1/h_a^2 = 3/h^2`, so `C = h^2/6`, every `alpha_a` is 1/6 and
+        # `n = 3 (sigma/h)^2 = 3 smooth_width^2` — the previous formula, term for term. The
+        # isotropic branch below is therefore taken verbatim (a literal 1/6, not a division that
+        # merely evaluates to it), which is what keeps a cubic run bit-identical.
+        if hv[0] == hv[1] == hv[2]:
+            self._smooth_alpha = (1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0)
+            self._smooth_ayz = (-1.0, -1.0)   # the kernel's "same as alpha" sentinel: no division
+            nsig = self.smooth_width ** 2 / (2.0 * self._smooth_alpha[0])   # today's expression
+        else:
+            inv2 = sum(1.0 / (x * x) for x in hv)
+            C = 1.0 / (2.0 * inv2)
+            self._smooth_alpha = tuple(C / (x * x) for x in hv)
+            self._smooth_ayz = self._smooth_alpha[1:]
+            nsig = self.smooth_length ** 2 * inv2
+        self._smooth_sweeps = max(1, int(round(nsig))) if self.smooth_length > 0.0 else 0
         # Volume-averaging validity: eps must be smooth over >~ the particle scale. With cells not
         # much larger than d_p the raw trilinear deposit is not a proper volume filter — smooth it.
-        if np.isscalar(radius) and self.h < 3.0 * (2.0 * float(radius)) \
-                and self.smooth_width * self.h < 1.5 * (2.0 * float(radius)):
-            import warnings
-            warnings.warn(
-                f"CfdDem: cell size h={self.h:g} is < 3 particle diameters and smooth_width is "
-                f"below ~1.5 d_p — the deposited void fraction is not a proper volume average at "
-                f"this resolution. Set smooth_width so the smoothing length exceeds the particle "
-                f"diameter (e.g. smooth_width={1.5 * 2.0 * float(radius) / self.h:.1f}).")
-        self._smooth_alpha = 1.0 / 6.0
-        self._smooth_sweeps = (max(1, int(round(self.smooth_width ** 2 / (2.0 * self._smooth_alpha))))
-                               if self.smooth_width > 0.0 else 0)
+        # Both comparisons are between PHYSICAL lengths: the coarsest cell against d_p (the
+        # coarsest axis is where the volume average is worst) and the realised filter width
+        # against d_p, which is the condition the literature actually states.
+        if np.isscalar(radius):
+            dp = 2.0 * float(radius)
+            if hmax < 3.0 * dp and self.smooth_length < 1.5 * dp:
+                import warnings
+                warnings.warn(
+                    f"CfdDem: the coarsest cell h={hmax:g} is < 3 particle diameters and the "
+                    f"filter width smooth_length={self.smooth_length:g} is below ~1.5 d_p "
+                    f"({1.5 * dp:g}) — the deposited void fraction is not a proper volume average "
+                    f"at this resolution. Set smooth_length >~ {1.5 * dp:g} (a physical length; "
+                    f"the older smooth_width is that in cells of the finest axis).")
         self.move_particles = bool(move_particles)  # False: fixed bed — skip DEM dynamics entirely
         self.implicit_drag = bool(implicit_drag)    # beta on the fluid diagonal (stable for stiff beds)
         # Volume-averaged continuity d(eps)/dt+div(eps u)=0 (proper unresolved CFD-DEM) — the DEFAULT:
@@ -371,10 +424,11 @@ class CfdDem:
                 # zero-flux, flux across rank faces is antisymmetric => volume conserved).
                 for _ in range(self._smooth_sweeps):
                     self.flow.exchange_field("solidvol")
-                    self._c.smooth_solid_volume(sv, *self._gm(), 1, self._smooth_alpha,
-                                                self._smooth_open)
+                    self._c.smooth_solid_volume(sv, *self._gm(), 1, self._smooth_alpha[0],
+                                                self._smooth_open, *self._smooth_ayz)
             else:
-                self._c.smooth_solid_volume(sv, *self._gm(), self._smooth_sweeps, self._smooth_alpha)
+                self._c.smooth_solid_volume(sv, *self._gm(), self._smooth_sweeps,
+                                            self._smooth_alpha[0], 0, *self._smooth_ayz)
         self._c.compute_void_fraction(sv, ep, self._inv_vcell_i, self.eps_min)
         if self.mpi:
             self.flow.exchange_field("eps")  # fill the ghosts the gather stencil reads

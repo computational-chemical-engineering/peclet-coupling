@@ -93,19 +93,23 @@ NB_MODULE(_coupling, m) {
   m.def(
       "smooth_solid_volume",
       [](nb::ndarray<> solidvol, double ox, double oy, double oz, double h, int ex, int ey, int ez,
-         int g, int nsweeps, double alpha, int open_faces) {
+         int g, int nsweeps, double alpha, int open_faces, double alpha_y, double alpha_z) {
         auto sv = flatField(solidvol, "smooth_solid_volume(solidvol)");
         Kokkos::View<double*, MemSpace> owner("peclet::coupling::smooth_tmp", sv.extent(0));
         FlatV tmp(owner.data(), owner.extent(0));  // unmanaged alias: same View type as `sv`
         peclet::coupling::smoothField(sv, tmp, gmap(ox, oy, oz, h, ex, ey, ez, g), nsweeps, alpha,
-                                      open_faces);
+                                      open_faces, alpha_y, alpha_z);
       },
       nb::arg("solidvol"), nb::arg("ox"), nb::arg("oy"), nb::arg("oz"), nb::arg("h"), nb::arg("ex"),
       nb::arg("ey"), nb::arg("ez"), nb::arg("g"), nb::arg("nsweeps"), nb::arg("alpha") = 1.0 / 6.0,
-      nb::arg("open_faces") = 0,
+      nb::arg("open_faces") = 0, nb::arg("alpha_y") = -1.0, nb::arg("alpha_z") = -1.0,
       "Volume-conserving diffusive smoothing of the deposited `solidvol` (MFIX DES_DIFFUSE_WIDTH "
-      "analog): nsweeps explicit diffusion sweeps => Gaussian sigma=sqrt(2*alpha*nsweeps) cells, "
-      "zero-flux at the domain boundary (conserves total solid volume). Call after folding ghosts, "
+      "analog): nsweeps explicit diffusion sweeps => Gaussian sigma_a=sqrt(2*alpha_a*nsweeps) "
+      "CELLS along axis a, i.e. a PHYSICAL sigma of sqrt(2*alpha_a*nsweeps)*h_a. `alpha_y`/"
+      "`alpha_z` default to `alpha` (the isotropic kernel, bit for bit); set alpha_a = C/h_a^2 to "
+      "realise the physically ISOTROPIC Gaussian the volume-filtering literature prescribes on a "
+      "mesh whose cells are boxes. Zero-flux at the domain boundary conserves total solid volume, "
+      "and it must be called after folding ghosts, "
       "before compute_void_fraction. `open_faces` (bit 2*axis / 2*axis+1 = minus/plus face): local "
       "faces that are interior MPI rank boundaries read the halo ghost instead of zero-flux — "
       "halo-fill before every sweep (nsweeps=1 per refresh).");

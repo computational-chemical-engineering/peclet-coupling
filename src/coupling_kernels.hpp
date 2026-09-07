@@ -168,8 +168,25 @@ void depositSolidVolume(int np, PosV pos, RadV rad, FieldV solidvol, FieldV sdf,
 // GLOBAL domain boundary stay closed (bit clear) to match the validated single-rank behaviour.
 // NOTE: smooths across immersed-solid cells too — fine for the walled beds here (no inner SDF); an
 // SDF-masked variant is a follow-up.
+/// **The diffusion coefficient is PER AXIS** (`suite/docs/PHYSICAL_UNITS_PLAN.md` Phase 3
+/// follow-up). `n` explicit sweeps of this Laplacian give a Gaussian of variance
+/// `sigma_a^2 = 2 alpha_a n h_a^2` along axis `a`, so a single `alpha` on a mesh whose cells are
+/// boxes realises an ELLIPSOIDAL filter with axis ratios `h_a` — while the volume-filtering
+/// literature (Capecelatro & Desjardins 2013; MFIX's DES_DIFFUSE_WIDTH; the anisotropic-mesh
+/// generalisation of the two-stage method) defines the filter by ONE physical width `delta_f`
+/// tied to the particle diameter. Choosing `alpha_a = C/h_a^2` makes `sigma_a` equal on every
+/// axis, i.e. the physically isotropic Gaussian the literature prescribes.
+///
+/// **Bit-identity.** `ay`/`az` enter as the RATIOS `ay/ax`, `az/ax`, which are exactly 1.0 when
+/// the three coefficients agree, and each of the six accumulations keeps its original left-to-
+/// right order (`lap += r * term` with `r == 1.0` is `lap += term`). The single `alpha * lap`
+/// multiply at the end is unchanged, so an isotropic call reproduces the previous kernel exactly.
+/// `ay`/`az` default to `alpha` (pass <= 0 for "same as x"), which makes both ratios EXACTLY 1.0.
 template <class FieldV>
-void smoothField(FieldV f, FieldV tmp, GridMap m, int nsweeps, double alpha, int openFaces = 0) {
+void smoothField(FieldV f, FieldV tmp, GridMap m, int nsweeps, double alpha, int openFaces = 0,
+                 double ay = -1.0, double az = -1.0) {
+  const double ry = (ay > 0.0) ? ay / alpha : 1.0;
+  const double rz = (az > 0.0) ? az / alpha : 1.0;
   using Exec = Kokkos::DefaultExecutionSpace;
   const int nx = m.ex - 2 * m.g, ny = m.ey - 2 * m.g, nz = m.ez - 2 * m.g, g = m.g;
   const long sx = 1, sy = m.ex, sz = (long)m.ex * m.ey;
@@ -188,12 +205,12 @@ void smoothField(FieldV f, FieldV tmp, GridMap m, int nsweeps, double alpha, int
           const double v = (double)src(c);
           double lap = 0.0;  // zero-flux: an out-of-domain neighbour contributes v (no gradient),
                              // unless that face is an open (rank-boundary) face — then read the ghost
-          lap += (ix > 0 || oxm ? (double)src(c - sx) : v) - v;
-          lap += (ix < nx - 1 || oxp ? (double)src(c + sx) : v) - v;
-          lap += (iy > 0 || oym ? (double)src(c - sy) : v) - v;
-          lap += (iy < ny - 1 || oyp ? (double)src(c + sy) : v) - v;
-          lap += (iz > 0 || ozm ? (double)src(c - sz) : v) - v;
-          lap += (iz < nz - 1 || ozp ? (double)src(c + sz) : v) - v;
+          lap += ((ix > 0 || oxm ? (double)src(c - sx) : v) - v);
+          lap += ((ix < nx - 1 || oxp ? (double)src(c + sx) : v) - v);
+          lap += ry * ((iy > 0 || oym ? (double)src(c - sy) : v) - v);
+          lap += ry * ((iy < ny - 1 || oyp ? (double)src(c + sy) : v) - v);
+          lap += rz * ((iz > 0 || ozm ? (double)src(c - sz) : v) - v);
+          lap += rz * ((iz < nz - 1 || ozp ? (double)src(c + sz) : v) - v);
           dst(c) = (typename FieldV::value_type)(v + alpha * lap);
         });
   }

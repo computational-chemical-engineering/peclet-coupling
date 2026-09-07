@@ -25,6 +25,15 @@ Per fluid step (`CfdDem.step()`):
    domain by more than one ghost layer** (e.g. pushed through a DEM wall by a violent contact solve)
    is dropped from the exchange entirely — no deposit, zero drag — so a runaway escapee can never
    feed a diverging `β·u_p` source into the boundary row.
+   The optional **volume filter** is a PHYSICAL width: `smooth_length` (MFIX's `DES_DIFFUSE_WIDTH`,
+   Capecelatro & Desjardins' `δ_f`) is a length in the caller's units, set from the particle
+   diameter — the point-particle approximation is what needs `δ_f ≫ d_p`, and it must not move
+   when the mesh does. It is realised as `n` explicit diffusion sweeps with a per-axis coefficient
+   `α_a = C/h_a²`, `C = 1/(2 Σ_a 1/h_a²)`, `n = round(σ² Σ_a 1/h_a²)`, so the Gaussian is a ball
+   in space and not in index — on a cubic mesh that reduces to `α = 1/6`, `n = round(3 w²)`, the
+   older `smooth_width` (cells) formula term for term and bit for bit. Gate:
+   `tests/test_smoothing_isotropy.py` (three physical `σ` equal to 8.9e-10 on a `(1, 2, 0.5)` cell,
+   the single-`α` ablation off by exactly the spacing ratios, the cubic mesh bitwise).
 2. **Drag + feedback** — gather the fluid velocity and ε at each particle, evaluate the drag law
    (Stokes / Schiller–Naumann / Ergun / Di Felice / Wen & Yu / Gidaspow), write the drag force to the
    particles and deposit the reaction onto the fluid momentum source.
