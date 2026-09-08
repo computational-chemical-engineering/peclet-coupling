@@ -68,25 +68,25 @@ jobs:
 
       - name: Build the peclet.flow module
         run: |
-          # main builds against core's main (the vendored default PECLET_TPX_TAG is the last core
+          # main builds against core's main (the vendored default PECLET_CORE_TAG is the last core
           # release, which lags the headers main already uses; the release repins it).
           cmake -S _siblings/flow -B _siblings/flow/build \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps-install" \
-            -DPECLET_TPX_TAG=main
+            -DPECLET_CORE_TAG=main
           cmake --build _siblings/flow/build -j
 
       - name: Build the peclet.dem module
         run: |
           cmake -S _siblings/dem -B _siblings/dem/build \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps-install" \
-            -DPECLET_TPX_TAG=main
+            -DPECLET_CORE_TAG=main
           cmake --build _siblings/dem/build -j
 
       - name: Build the peclet.coupling module
         run: |
           cmake -S . -B build \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps-install" \
-            -DPECLET_TPX_TAG=main
+            -DPECLET_CORE_TAG=main
           cmake --build build -j
           # the pure-Python drivers are staged beside the extension (configure_file does it at
           # configure time; re-copy so an edit after configure can never test a stale driver)

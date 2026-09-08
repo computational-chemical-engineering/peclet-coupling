@@ -23,7 +23,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(PecletDeps)
 peclet_require_kokkos()
 peclet_require_nanobind()
-peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../core" CORE_INC)
+peclet_sibling_include(peclet-core "${PECLET_CORE_TAG}" "../core" CORE_INC)
 
 nanobind_add_module(coupling NB_STATIC NOMINSIZE src/coupling_bindings.cpp)
 set_target_properties(coupling PROPERTIES OUTPUT_NAME _coupling  # -> peclet.coupling._coupling
