@@ -1,6 +1,6 @@
 """ResolvedCfdDem -- resolved (geometry-resolving) CFD-DEM.
 
-Layer 4 of suite/docs/ANALYTIC_SDF_GEOMETRY.md. Where `CfdDem` treats a grain as a point with a
+Layer 4 of suite/docs/archive/ANALYTIC_SDF_GEOMETRY.md. Where `CfdDem` treats a grain as a point with a
 drag closure, this driver makes each grain an ANALYTIC SDF INSTANCE in the flow solver's scene: the
 fluid resolves the actual surface, no-slip is enforced on the moving wall by the cut-cell IBM
 (Layer 3 rung 2), the projection carries the wall's own volume flux (rung 3), and the coupling is a hydrodynamic-load exchange (rung L4-R2) with no drag correlation anywhere in it:
@@ -90,7 +90,7 @@ class ResolvedCfdDem:
         # the fluid lost IS the momentum the grain gains) and as accurate as the flow solution it
         # sustains. "traction": the reconstructed surface integral, kept as a diagnostic; it
         # under-reads the drag by a resolution-independent ~29% (measured), which in this loop
-        # shows up as a total-momentum leak. See suite/docs/ANALYTIC_SDF_GEOMETRY.md OPEN FOR
+        # shows up as a total-momentum leak. See suite/docs/archive/ANALYTIC_SDF_GEOMETRY.md OPEN FOR
         # REVIEW 1.
         if force_method not in ("reaction", "traction"):
             raise ValueError("force_method must be 'reaction' or 'traction'")

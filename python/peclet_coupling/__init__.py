@@ -7,7 +7,7 @@ compute kernels (particle<->grid deposition, drag laws, momentum feedback) live 
 extension, running in place on the arrays the two solvers expose (zero-copy grid fields; particle
 forces round-tripped through the dem host API).
 
-ResolvedCfdDem is the RESOLVED driver (Layer 4 of suite/docs/ANALYTIC_SDF_GEOMETRY.md): each grain
+ResolvedCfdDem is the RESOLVED driver (Layer 4 of suite/docs/archive/ANALYTIC_SDF_GEOMETRY.md): each grain
 IS an analytic SDF instance in the flow solver's scene, the fluid resolves its surface, and the
 coupling is a surface-traction exchange with no drag correlation in it. Pure Python -- it needs no
 compiled kernels of its own.
