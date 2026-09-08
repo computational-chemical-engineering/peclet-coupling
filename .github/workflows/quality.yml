@@ -1,0 +1,42 @@
+name: Quality
+
+# Lightweight, non-breaking code-quality gates. The Python job hard-fails on *critical* errors only
+# (syntax errors, undefined names, bad string formatting / comparisons — the classic stop-the-build
+# set), so it catches real bugs without drowning research scripts in style nits.
+
+on:
+  push:
+    branches: [main, "**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python-lint:
+    name: ruff (critical errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - name: Ruff critical-error check
+        run: |
+          ruff check . --select E9,F63,F7,F82 \
+            --exclude ".venv,venv,build,build_*,__pycache__,_deps,_siblings,extern,notebooks"
+
+  cpp-format:
+    name: clang-format (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install "clang-format==18.1.8"
+      - name: clang-format dry-run (uses the repo .clang-format)
+        run: |
+          files=$(git ls-files 'src/*.hpp' 'src/*.cpp')
+          [ -z "$files" ] && { echo "no C++ sources"; exit 0; }
+          clang-format --dry-run --Werror $files

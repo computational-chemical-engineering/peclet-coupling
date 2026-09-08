@@ -1,0 +1,108 @@
+name: CI
+
+# Build the Kokkos (OpenMP/Serial) backend + ArborX from source, then build peclet.flow, peclet.dem
+# and peclet.coupling against it and run the coupling's single-rank validation battery under pytest
+# (terminal velocity vs Stokes / Schiller-Naumann, the fixed-bed Ergun curve on both fluid modes, the
+# porosity-filter isotropy gate). The GPU (CUDA/HIP) backends and the multi-rank tests
+# (tests/test_mpi_*.py, which need the PECLET_*_MPI builds + mpi4py and SKIP under pytest here) are
+# NOT exercisable on free GitHub runners. The sibling repos are checked out beside this one and built
+# the way their own ci.yml builds them; the three build trees go on PYTHONPATH (PEP-420 namespace
+# `peclet`), exactly as the README's local recipe does.
+
+on:
+  push:
+    branches: [main, "**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  KOKKOS_TAG: "5.1.1"   # keep in lockstep with ../tools/bootstrap_deps.sh
+  ARBORX_TAG: "v2.1"
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check out the sibling method codes (flow + dem, main)
+        uses: actions/checkout@v7
+        with:
+          repository: computational-chemical-engineering/peclet-flow
+          path: _siblings/flow
+      - uses: actions/checkout@v7
+        with:
+          repository: computational-chemical-engineering/peclet-dem
+          path: _siblings/dem
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libomp-dev python3-dev python3-pip
+          python3 -m pip install --upgrade pip nanobind numpy pytest
+
+      - name: Cache Kokkos + ArborX install
+        id: deps-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/deps-install
+          key: kokkos-${{ env.KOKKOS_TAG }}-arborx-${{ env.ARBORX_TAG }}-openmp-${{ runner.os }}
+
+      - name: Build Kokkos (OpenMP + Serial) + ArborX
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          PREFIX="$GITHUB_WORKSPACE/deps-install"
+          git clone --depth 1 --branch "$KOKKOS_TAG" https://github.com/kokkos/kokkos.git /tmp/kokkos
+          cmake -S /tmp/kokkos -B /tmp/kokkos/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=20 \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX"
+          cmake --build /tmp/kokkos/build -j && cmake --install /tmp/kokkos/build
+          # ArborX is header-only; it just needs to find the Kokkos we built.
+          git clone --depth 1 --branch "$ARBORX_TAG" https://github.com/arborx/ArborX.git /tmp/arborx
+          cmake -S /tmp/arborx -B /tmp/arborx/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=20 \
+            -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_INSTALL_PREFIX="$PREFIX"
+          cmake --install /tmp/arborx/build
+
+      - name: Build the peclet.flow module
+        run: |
+          # main builds against core's main (the vendored default PECLET_TPX_TAG is the last core
+          # release, which lags the headers main already uses; the release repins it).
+          cmake -S _siblings/flow -B _siblings/flow/build \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps-install" \
+            -DPECLET_TPX_TAG=main
+          cmake --build _siblings/flow/build -j
+
+      - name: Build the peclet.dem module
+        run: |
+          cmake -S _siblings/dem -B _siblings/dem/build \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps-install" \
+            -DPECLET_TPX_TAG=main
+          cmake --build _siblings/dem/build -j
+
+      - name: Build the peclet.coupling module
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps-install" \
+            -DPECLET_TPX_TAG=main
+          cmake --build build -j
+          # the pure-Python drivers are staged beside the extension (configure_file does it at
+          # configure time; re-copy so an edit after configure can never test a stale driver)
+          cp python/peclet_coupling/__init__.py python/peclet_coupling/driver.py \
+             python/peclet_coupling/resolved.py build/peclet/coupling/
+
+      - name: Import smoke test
+        env:
+          PYTHONPATH: ${{ github.workspace }}/build:${{ github.workspace }}/_siblings/flow/build:${{ github.workspace }}/_siblings/dem/build
+        run: |
+          python3 -c "import peclet.flow, peclet.dem, peclet.coupling; from peclet.coupling import CfdDem, ResolvedCfdDem, _coupling; print('peclet.coupling import OK')"
+
+      - name: Single-rank validation battery (pytest)
+        env:
+          PYTHONPATH: ${{ github.workspace }}/build:${{ github.workspace }}/_siblings/flow/build:${{ github.workspace }}/_siblings/dem/build
+          OMP_NUM_THREADS: "2"
+          OMP_PROC_BIND: "false"
+        run: |
+          python3 -m pytest tests -q -k "terminal or ergun or isotropy" -p no:cacheprovider

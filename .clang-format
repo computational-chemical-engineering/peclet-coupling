@@ -1,0 +1,62 @@
+# Google C++ Style Guide – clang-format configuration
+# https://google.github.io/styleguide/cppguide.html
+#
+# Applied to files under include/ and tests/.
+
+BasedOnStyle: Google
+Language: Cpp
+
+# Column limit
+ColumnLimit: 100
+
+# Indentation
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ContinuationIndentWidth: 4
+
+# Braces
+BreakBeforeBraces: Attach
+
+# Alignment
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignTrailingComments: true
+
+# Include sorting
+IncludeBlocks: Regroup
+SortIncludes: CaseInsensitive
+
+# Pointer/reference alignment
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Spaces
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInAngles: false
+SpacesInContainerLiterals: false
+
+# Short-form options (Google defaults)
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+
+# Template
+SpaceAfterTemplateKeyword: true
+
+# Constructor initializer lists
+BreakConstructorInitializers: BeforeComma
+ConstructorInitializerIndentWidth: 4
+
+# Class access modifiers
+AccessModifierOffset: -1
+
+# Namespace
+NamespaceIndentation: None
+CompactNamespaces: false
+
+# Comments
+ReflowComments: true
