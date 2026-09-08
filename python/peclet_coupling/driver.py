@@ -254,7 +254,7 @@ class CfdDem:
         else:
             flow.enable_cell_force()  # explicit reaction force in force_x/y/z
         self.dem.set_dt(self.dt_dem)
-        N = dem.num_particles()  # this rank's OWNED count under MPI
+        N = dem.num_particles  # this rank's OWNED count under MPI
         self._N = N
         # Radii, like every other length here, are handed to the kernels in CELLS.
         kl = self._k_len
@@ -522,8 +522,7 @@ class CfdDem:
             if self.mpi:
                 self.dem.step_mpi(self.dem_substeps)  # distributed substeps (halo exchange)
             else:
-                for _ in range(self.dem_substeps):
-                    self.dem.step(self.dt_dem)
+                self.dem.step(self.dem_substeps)  # dt comes from set_dt (dem 1.0.0)
         self.flow.step()
 
     def rebalance(self, gamma=1.0):

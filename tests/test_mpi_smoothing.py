@@ -69,7 +69,7 @@ def run(comm):
     s.set_pressure_geometry(np.asfortranarray(np.full((lnx, lny, lnz), 10.0)))
 
     d = peclet.dem.Simulation(max(Np, 1))
-    d.initialize_shape(1, radius=R)
+    d.initialize_shape('sphere', radius=R)
     d.set_domain(extent=(N, N, N), periodic=(True, True, True))
     posw = np.concatenate([mine, np.zeros((Np, 1), dtype=np.float32)], axis=1)  # invMass 0: fixed
     d.set_positions(posw)

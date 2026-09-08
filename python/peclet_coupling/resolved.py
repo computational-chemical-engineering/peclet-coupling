@@ -95,11 +95,11 @@ class ResolvedCfdDem:
         if force_method not in ("reaction", "traction"):
             raise ValueError("force_method must be 'reaction' or 'traction'")
         self.force_method = force_method
-        self.n = int(dem.num_particles())
+        self.n = int(dem.num_particles)
         self.last_force = np.zeros((self.n, 3))
         self.last_torque = np.zeros((self.n, 3))
         flow.set_dt(self.fluid_dt)
-        dem.set_dt(self.dt_dem)   # kept in sync, though step(dt) below passes it explicitly
+        dem.set_dt(self.dt_dem)   # the sub-steps below run on this stored dt (dem 1.0.0: no stepper takes dt)
         self._install_scene()
 
     # --- L4-R1: the dem -> scene bridge --------------------------------------------------------
@@ -180,8 +180,7 @@ class ResolvedCfdDem:
             # constant over the sub-steps, exactly like the force.
             self.dem.set_external_torques(
                 np.ascontiguousarray(self.last_torque, dtype=np.float32))
-        for _ in range(self.dem_substeps):
-            # dt MUST be passed explicitly. dem's step(dt=0) is a dynamics-free relaxation step
-            # (overlap removal only), so step() with no argument advances nothing and the driver
-            # would run happily with a frozen particle.
-            self.dem.step(self.dt_dem)
+        # dem 1.0.0: the sub-step count is the argument and the time step comes from set_dt (called
+        # in __init__). The dynamics-free relaxation move is a separate method, `relax(n)`, so a
+        # step() here can no longer silently degrade into overlap removal with frozen particles.
+        self.dem.step(self.dem_substeps)

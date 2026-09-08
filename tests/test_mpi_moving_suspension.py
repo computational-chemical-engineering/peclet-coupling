@@ -60,9 +60,9 @@ def run(comm, N=32, r=0.7, steps=6, v0=-6.0):
     posw = np.concatenate([mine, np.full((Np, 1), 1.0 / m_p, dtype=np.float32)], axis=1)
 
     d = peclet.dem.Simulation(6 * 36 + 64)
-    d.initialize_shape(1, radius=r)
+    d.initialize_shape('sphere', radius=r)
     d.set_domain(extent=(N, N, N), periodic=(True, True, True))
-    d.set_gravity(0.0, 0.0, 0.0)
+    d.set_gravity((0.0, 0.0, 0.0))
     vel = np.zeros((Np, 3), dtype=np.float32); vel[:, 0] = v0
     d.set_positions(posw); d.set_velocities(vel)
     d.init_mpi((0.0, 0.0, 0.0), (float(N),) * 3, (N, N, N), (True, True, True))

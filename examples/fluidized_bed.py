@@ -134,9 +134,9 @@ def build(P, comm=None):
     pos, npart = initial_packing(P, rp)
     cap = int(2.2 * npart) + 256
     d = peclet.dem.Simulation(cap)
-    d.initialize_shape(1, radius=rp)      # 1 = sphere, radius rp directly (SI-style: the DEM
+    d.initialize_shape('sphere', radius=rp)      # radius rp directly (SI-style: the DEM
     d.set_domain(extent=P.extent, periodic=(False, False, False))  # sizes its halo band from the actual grain radius)
-    d.set_gravity(0.0, 0.0, -P.g)
+    d.set_gravity((0.0, 0.0, -P.g))
     d.set_material_params(P.e_pp, 0.0, P.mu_pp)
     d.set_dt(P.fluid_dt / P.dem_substeps)
     wall = build_wall_sdf(capped_cylinder_wall_sdf(P), ((0, 0, 0), P.extent), resolution=64)

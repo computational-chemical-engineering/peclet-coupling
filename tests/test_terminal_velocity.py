@@ -21,9 +21,9 @@ def terminal(drag, g=1e-3, r=1.0, mu=1.0, rho_p=1.0, rho_f=1.0, N=32, steps=120)
     s.set_rho(rho_f); s.set_mu(mu); s.set_dt(0.1)
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, N), 10.0)))
     d = peclet.dem.Simulation(1)
-    d.initialize_shape(1, radius=r)
+    d.initialize_shape('sphere', radius=r)
     d.set_domain(extent=(N, N, N), periodic=(True, True, True))
-    d.set_gravity(0, 0, -g)  # acceleration
+    d.set_gravity((0, 0, -g))  # acceleration
     d.set_positions(np.array([[N / 2, N / 2, N / 2, 1.0 / m_p]], dtype=np.float32))  # w = invMass
     d.set_velocities(np.zeros((1, 3), dtype=np.float32))
     cpl = CfdDem(s, d, fluid_dt=0.1, mu=mu, rho=rho_f, radius=r, drag=drag, dem_substeps=10,

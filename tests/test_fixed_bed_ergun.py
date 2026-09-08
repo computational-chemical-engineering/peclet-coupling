@@ -43,7 +43,7 @@ def run_bed(f_drive, eps_target=0.6, N=16, mu=1.0, rho=1.0, dt=0.5, steps=120):
     s.set_body_force(0.0, 0.0, f_drive)
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, N), 10.0)))
     d = peclet.dem.Simulation(Np)
-    d.initialize_shape(1, radius=r)
+    d.initialize_shape('sphere', radius=r)
     d.set_domain(extent=(N, N, N), periodic=(True, True, True))
     d.set_positions(posw)
     d.set_velocities(np.zeros((Np, 3), dtype=np.float32))
