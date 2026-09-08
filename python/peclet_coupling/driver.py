@@ -2,7 +2,7 @@
 
 Composes a peclet.flow.Solver (the Eulerian fluid) and a peclet.dem.Simulation (Lagrangian
 particles). BOTH LIVE IN THE SAME PHYSICAL COORDINATES: the driver takes the cell size and the lower
-corner from the flow solver itself (`flow.get_spacing()` / `flow.origin`), so a solver built with
+corner from the flow solver itself (`flow.spacing` / `flow.origin`), so a solver built with
 `Solver(cells, extent=...)` couples to a DEM stated in metres with no conversion anywhere, and a
 solver built the old way (no extent) keeps the historical cell units — spacing 1, origin 0, cell i
 centred at i + 1/2 — bit for bit. Each fluid step:
@@ -28,8 +28,8 @@ def _sl(axis, idx):
 
 class CfdDem:
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
-                 dem_substeps=20, eps_min=0.25, smooth_width=0.0, smooth_length=None,
-                 periodic=(True, True, True), h=None,
+                 dem_substeps=20, eps_min=0.25, smooth_length=0.0,
+                 periodic=(True, True, True),
                  move_particles=True, implicit_drag=True, porous=True, advection=True,
                  gravity=(0.0, 0.0, 0.0)):
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
@@ -46,12 +46,7 @@ class CfdDem:
         # per-particle drag force comes back to the caller's units before it reaches dem. On a
         # cell-unit solver every factor below is exactly 1.0, `_u_id` is True, and the zero-copy
         # views are handed through untouched — bit for bit the pre-refactor driver.
-        us = getattr(flow, "unit_scales", None)
-        if us is None:  # a flow build older than the physical-domains release
-            us = {"identity": True, "h_ref": 1.0, "rho_ref": 1.0, "t_ref": 1.0,
-                  "length_to_internal": 1.0, "velocity_to_internal": [1.0, 1.0, 1.0],
-                  "time_to_internal": 1.0, "density_to_internal": 1.0,
-                  "viscosity_to_internal": 1.0, "force_to_physical": 1.0}
+        us = flow.unit_scales
         self._us = us
         self._u_id = bool(us["identity"])
         self._k_len = float(us["length_to_internal"])          # physical length -> cells
@@ -60,25 +55,19 @@ class CfdDem:
         self._k_mass = float(us["rho_ref"]) * float(us["h_ref"]) ** 3   # physical mass -> internal
         self._k_acc = float(us["t_ref"]) ** 2 / float(us["h_ref"])      # acceleration -> internal
         self._k_force_out = float(us["force_to_physical"])     # internal total force -> physical
-        # The cell size comes from the fluid solver, never from the caller: `h=None` (the default)
-        # reads flow.get_spacing(), which is 1 on a cell-unit solver and extent/cells on a physical
-        # one. An explicit `h` still wins, so every pre-existing call is unchanged.
-        if h is None:
-            sp = [float(v) for v in flow.get_spacing()]
-            if max(abs(v - sp[0]) for v in sp) > 1e-12 * abs(sp[0]):
-                raise ValueError(
-                    "CfdDem: the flow solver's spacing is {} — anisotropic cells. The SOLVER "
-                    "admits them (physical-domains Phases 2-3); this driver does not, and the "
-                    "reason is the particle model, not the map: an unresolved CFD-DEM particle "
-                    "has ONE radius and the drag law needs ONE Reynolds number, so posing the "
-                    "coupling on a box cell has no single length scale to reduce them to. Use a "
-                    "cubic mesh for the fluid the particles see.".format(sp))
-            h = sp[0]
-        h = [float(v) for v in h] if hasattr(h, "__len__") else [float(h)] * 3
+        # The cell size comes from the fluid solver, never from the caller: `flow.spacing` is 1 on a
+        # cell-unit solver and extent/cells on a physical one. (The pre-1.0 `h=` override is gone.)
+        h = [float(v) for v in flow.spacing]
         if max(abs(v - h[0]) for v in h) > 1e-12 * abs(h[0]):
-            raise ValueError(f"CfdDem: h={h} is anisotropic; see the spacing guard above.")
-        # The three spacings, in the caller's units. They are equal today (both paths above
-        # enforce it) and the code below is nevertheless written per axis, so that everything
+            raise ValueError(
+                "CfdDem: the flow solver's spacing is {} — anisotropic cells. The SOLVER "
+                "admits them (physical-domains Phases 2-3); this driver does not, and the "
+                "reason is the particle model, not the map: an unresolved CFD-DEM particle "
+                "has ONE radius and the drag law needs ONE Reynolds number, so posing the "
+                "coupling on a box cell has no single length scale to reduce them to. Use a "
+                "cubic mesh for the fluid the particles see.".format(h))
+        # The three spacings, in the caller's units. They are equal today (the guard above
+        # enforces it) and the code below is nevertheless written per axis, so that everything
         # that does NOT depend on the particle model — the porosity filter, the cell volume — is
         # already right on the day the guard lifts, and its isotropic branch is what runs now.
         self.hvec = (h[0], h[1], h[2])
@@ -121,20 +110,14 @@ class CfdDem:
         # (`delta_f >> d_p` is what justifies the point-particle approximation at all); the
         # published generalisation of the method to unstructured/anisotropic meshes keeps exactly
         # that invariant — the result converges to a Gaussian of the PRESCRIBED `delta_f` under
-        # mesh refinement. So `smooth_length` is the preferred spelling and it is a length in the
-        # caller's units.
-        #
-        # `smooth_width` (cells) is the older spelling and still works: it means cells of the
-        # FINEST axis, `smooth_length = smooth_width * min_a h_a`, which on a cubic grid is
-        # `smooth_width * h` — today's meaning exactly.
+        # mesh refinement. So `smooth_length` is a length in the caller's units (0 = no filter);
+        # the pre-1.0 `smooth_width` (cells of the finest axis) is gone. Internally the width in
+        # cells of the finest axis, `smooth_length / min_a h_a`, is what the cubic-mesh formula
+        # below takes — on a cubic grid that is the old `smooth_width` exactly.
         hv = self.hvec
         hmin, hmax = min(hv), max(hv)
-        if smooth_length is not None:
-            self.smooth_length = float(smooth_length)
-            self.smooth_width = self.smooth_length / hmin
-        else:
-            self.smooth_width = float(smooth_width)
-            self.smooth_length = self.smooth_width * hmin
+        self.smooth_length = float(smooth_length)
+        self._smooth_cells = self.smooth_length / hmin
         # `n` sweeps of the explicit Laplacian with coefficient `alpha_a` give a Gaussian of
         # variance `sigma_a^2 = 2 alpha_a n h_a^2` along axis `a`. Equal PHYSICAL sigma on every
         # axis therefore needs `alpha_a = C/h_a^2`, and explicit-diffusion stability
@@ -143,13 +126,13 @@ class CfdDem:
         #     sigma^2 = 2 C n     =>     n = sigma^2 * sum_a 1/h_a^2
         #
         # On a CUBIC grid `sum_a 1/h_a^2 = 3/h^2`, so `C = h^2/6`, every `alpha_a` is 1/6 and
-        # `n = 3 (sigma/h)^2 = 3 smooth_width^2` — the previous formula, term for term. The
-        # isotropic branch below is therefore taken verbatim (a literal 1/6, not a division that
-        # merely evaluates to it), which is what keeps a cubic run bit-identical.
+        # `n = 3 (sigma/h)^2` — the previous formula, term for term. The isotropic branch below
+        # is therefore taken verbatim (a literal 1/6, not a division that merely evaluates to it),
+        # which is what keeps a cubic run bit-identical.
         if hv[0] == hv[1] == hv[2]:
             self._smooth_alpha = (1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0)
             self._smooth_ayz = (-1.0, -1.0)   # the kernel's "same as alpha" sentinel: no division
-            nsig = self.smooth_width ** 2 / (2.0 * self._smooth_alpha[0])   # today's expression
+            nsig = self._smooth_cells ** 2 / (2.0 * self._smooth_alpha[0])   # today's expression
         else:
             inv2 = sum(1.0 / (x * x) for x in hv)
             C = 1.0 / (2.0 * inv2)
@@ -170,8 +153,7 @@ class CfdDem:
                     f"CfdDem: the coarsest cell h={hmax:g} is < 3 particle diameters and the "
                     f"filter width smooth_length={self.smooth_length:g} is below ~1.5 d_p "
                     f"({1.5 * dp:g}) — the deposited void fraction is not a proper volume average "
-                    f"at this resolution. Set smooth_length >~ {1.5 * dp:g} (a physical length; "
-                    f"the older smooth_width is that in cells of the finest axis).")
+                    f"at this resolution. Set smooth_length >~ {1.5 * dp:g} (a physical length).")
         self.move_particles = bool(move_particles)  # False: fixed bed — skip DEM dynamics entirely
         self.implicit_drag = bool(implicit_drag)    # beta on the fluid diagonal (stable for stiff beds)
         # Volume-averaged continuity d(eps)/dt+div(eps u)=0 (proper unresolved CFD-DEM) — the DEFAULT:
@@ -189,10 +171,9 @@ class CfdDem:
         self.drag_kind = {"stokes": DRAG_STOKES, "schiller_naumann": DRAG_SCHILLER_NAUMANN,
                           "ergun": DRAG_ERGUN, "di_felice": DRAG_DI_FELICE,
                           "wen_yu": DRAG_WEN_YU, "gidaspow": DRAG_GIDASPOW,
-                          "beetstra": DRAG_BEETSTRA, "bvk": DRAG_BEETSTRA,
-                          "tang": DRAG_TANG, "bvk2": DRAG_TANG}[drag]
+                          "beetstra": DRAG_BEETSTRA, "tang": DRAG_TANG}[drag]
 
-        nx, ny, nz = flow.get_resolution()  # LOCAL block dims under MPI
+        nx, ny, nz = flow.cells  # LOCAL block dims under MPI
         self.g = flow.ghost_width()
         self.nx, self.ny, self.nz = nx, ny, nz
         self.ex, self.ey, self.ez = nx + 2 * self.g, ny + 2 * self.g, nz + 2 * self.g
@@ -213,7 +194,7 @@ class CfdDem:
         self._org = [float(v) for v in getattr(flow, "origin", (0.0, 0.0, 0.0))]
         bo = flow.block_origin() if self.mpi else (0, 0, 0)
         self._setBlockOrigin(bo)
-        gnx, gny, gnz = flow.global_resolution() if self.mpi else (nx, ny, nz)
+        gnx, gny, gnz = flow.global_cells if self.mpi else (nx, ny, nz)
         self.gnx, self.gny, self.gnz = gnx, gny, gnz
         # Smoothing under MPI: a local block face that is an INTERIOR rank boundary is not a wall —
         # the diffusion sweep must read the halo ghost there (bit set), while faces on the GLOBAL
@@ -574,5 +555,5 @@ class CfdDem:
         # flow's block moved -> refresh the deposit-origin shift + local extents.
         bo = self.flow.block_origin()
         self._setBlockOrigin(bo)
-        self.nx, self.ny, self.nz = self.flow.get_resolution()
+        self.nx, self.ny, self.nz = self.flow.cells
         self.ex, self.ey, self.ez = (self.nx + 2 * self.g, self.ny + 2 * self.g, self.nz + 2 * self.g)

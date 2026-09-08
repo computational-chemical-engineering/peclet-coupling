@@ -32,15 +32,19 @@ from peclet.coupling import CfdDem
 
 
 # ----------------------------------------------------------------------------------------------------
-# parameters (grid units: cell size h = 1; the bed sits in a box, cylinder axis along z)
+# parameters. PHYSICAL UNITS: flow and dem share one consistent unit system, the fluid solver is
+# built on a physical box (Solver(cells, extent=...)) and CfdDem takes the cell size from
+# `flow.spacing` -- no length below is stated in cells. (The mesh happens to have unit cells,
+# extent/cells = 1, so a run with the pre-1.0 cell-unit numbers is reproduced bit for bit.)
+# The bed sits in a box, cylinder axis along z.
 # ----------------------------------------------------------------------------------------------------
 class Params:
-    NX = NY = 8           # lateral grid (cells)
-    NZ = 18               # tall column (bed + freeboard)
-    R = 2.5               # vessel radius (cells)
-    H_wall = 12.0         # particle containment wall height (< NZ so the gas has a freeboard)
+    cells = (8, 8, 18)    # the mesh: 8x8 lateral, a tall column (bed + freeboard)
+    extent = (8.0, 8.0, 18.0)   # the box (length units)
+    R = 2.5               # vessel radius
+    H_wall = 12.0         # particle containment wall height (< the box height, so the gas has a freeboard)
     dp = 0.2              # particle diameter -> cell size / dp = 5 (unresolved CFD-DEM)
-    n_bed = 3.0           # initial loose-bed height (cells)
+    n_bed = 3.0           # initial loose-bed height
     solid_frac = 0.45     # initial packing solid fraction (settles into a packed bed)
 
     rho_g = 1.0           # gas density
@@ -60,13 +64,12 @@ class Params:
     porous = True   # volume-averaged continuity d(eps)/dt+div(eps u)=0 (proper unresolved CFD-DEM)
 
 
-def cylinder_flow_sdf(P):
-    """Flow IBM SDF on the inner grid (x-fastest): >0 in the fluid inside the vessel, <0 in the wall
-    outside radius R. The bottom/top are OPEN (domain inflow/outflow faces), only the side confines."""
-    cx, cy = P.NX / 2.0, P.NY / 2.0
-    x = np.arange(P.NX) + 0.5
-    y = np.arange(P.NY) + 0.5
-    X, Y, Z = np.meshgrid(x, y, np.arange(P.NZ) + 0.5, indexing="ij")
+def cylinder_flow_sdf(P, s):
+    """Flow IBM SDF sampled on the solver's own cell centres (this rank's block, global physical
+    coordinates): >0 in the fluid inside the vessel, <0 in the wall outside radius R. The bottom/top
+    are OPEN (domain inflow/outflow faces), only the side confines."""
+    cx, cy = P.extent[0] / 2.0, P.extent[1] / 2.0
+    X, Y, Z = np.meshgrid(*s.cell_centers(), indexing="ij")
     rad = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
     return (P.R - rad).astype(np.float64)
 
@@ -74,7 +77,7 @@ def cylinder_flow_sdf(P):
 def capped_cylinder_wall_sdf(P):
     """Particle wall f(points)->distance, >0 in the void where grains live: inside radius R, above the
     distributor (z>0), below the containment lid (z<H_wall)."""
-    cx, cy = P.NX / 2.0, P.NY / 2.0
+    cx, cy = P.extent[0] / 2.0, P.extent[1] / 2.0
 
     def f(pts):
         rad = np.sqrt((pts[:, 0] - cx) ** 2 + (pts[:, 1] - cy) ** 2)
@@ -85,7 +88,7 @@ def capped_cylinder_wall_sdf(P):
 
 def initial_packing(P, rp):
     """Loose sphere positions inside the vessel, z in (rp, n_bed]; settles into a packed bed."""
-    cx, cy = P.NX / 2.0, P.NY / 2.0
+    cx, cy = P.extent[0] / 2.0, P.extent[1] / 2.0
     vol_bed = np.pi * P.R ** 2 * P.n_bed
     vp = (4.0 / 3.0) * np.pi * rp ** 3
     npart = int(P.solid_frac * vol_bed / vp)
@@ -109,10 +112,10 @@ def build(P, comm=None):
 
     # --- flow: cylindrical no-slip vessel + gas inflow(bottom)/outflow(top) --------------------------
     if mpi:
-        (ox, oy, oz), (lnx, lny, lnz) = peclet.flow.mpi_block(P.NX, P.NY, P.NZ)
-        s = peclet.flow.Solver(lnx, lny, lnz)
+        (ox, oy, oz), (lnx, lny, lnz) = peclet.flow.mpi_block(*P.cells)
+        s = peclet.flow.Solver((lnx, lny, lnz), extent=P.extent, global_cells=P.cells)
     else:
-        s = peclet.flow.Solver(P.NX, P.NY, P.NZ)
+        s = peclet.flow.Solver(P.cells, extent=P.extent)
     s.set_rho(P.rho_g); s.set_mu(P.mu_g); s.set_dt(P.fluid_dt)
     s.set_domain_bc(4, 2, 0.0, 0.0, P.U_in)   # -z face: inflow, gas velocity U up
     s.set_domain_bc(5, 3)                      # +z face: outflow
@@ -123,45 +126,41 @@ def build(P, comm=None):
     # ~10x faster flow step. (A tighter algebraic pressure solve for this geometry is a follow-up.)
     s.set_pressure_pcg(True, 50, 1e-6)
     # gas convection (implicit FOU + deferred TVD) is enabled by CfdDem by default (advection=True)
-    gsdf = cylinder_flow_sdf(P)
     if mpi:
-        s.init_mpi(P.NX, P.NY, P.NZ)
-        lsdf = gsdf[ox:ox + lnx, oy:oy + lny, oz:oz + lnz]
-        s.set_solid(np.asfortranarray(lsdf).flatten(order="F"), True)
-    else:
-        s.set_solid(gsdf.flatten(order="F"), True)
+        s.init_mpi(*P.cells)
+    s.set_solid(np.asfortranarray(cylinder_flow_sdf(P, s)).flatten(order="F"), True)
 
     # --- dem: spheres + capped-cylinder wall (restitution+friction) + gravity ------------------------
     pos, npart = initial_packing(P, rp)
     cap = int(2.2 * npart) + 256
     d = peclet.dem.Simulation(cap)
-    d.initialize(shape_type=1, radius=rp)      # 1 = sphere, radius rp directly (SI-style: the DEM
-    d.set_domain((0, 0, 0), (P.NX, P.NY, P.NZ))  # sizes its halo band from the actual grain radius)
-    d.enable_periodicity(False, False, False)
+    d.initialize_shape(1, radius=rp)      # 1 = sphere, radius rp directly (SI-style: the DEM
+    d.set_domain(extent=P.extent, periodic=(False, False, False))  # sizes its halo band from the actual grain radius)
     d.set_gravity(0.0, 0.0, -P.g)
     d.set_material_params(P.e_pp, 0.0, P.mu_pp)
     d.set_dt(P.fluid_dt / P.dem_substeps)
-    wall = build_wall_sdf(capped_cylinder_wall_sdf(P),
-                          ((0, 0, 0), (P.NX, P.NY, P.NZ)), resolution=64)
+    wall = build_wall_sdf(capped_cylinder_wall_sdf(P), ((0, 0, 0), P.extent), resolution=64)
     wall.add_to(d, restitution=P.e_wall, friction=P.mu_wall)
 
     posw = np.concatenate([pos, np.full((npart, 1), 1.0 / m_p, np.float32)], axis=1)
     if mpi:
-        keep = ((np.floor(pos[:, 0]) >= ox) & (np.floor(pos[:, 0]) < ox + lnx) &
-                (np.floor(pos[:, 1]) >= oy) & (np.floor(pos[:, 1]) < oy + lny) &
-                (np.floor(pos[:, 2]) >= oz) & (np.floor(pos[:, 2]) < oz + lnz))
+        # this rank's ORB block in cell indices -> keep the grains whose cell lies in it
+        cell = np.floor(pos / np.asarray(s.spacing, dtype=np.float32)).astype(int)
+        keep = ((cell[:, 0] >= ox) & (cell[:, 0] < ox + lnx) &
+                (cell[:, 1] >= oy) & (cell[:, 1] < oy + lny) &
+                (cell[:, 2] >= oz) & (cell[:, 2] < oz + lnz))
         posw = posw[keep]
         d.set_positions(posw)
         d.set_velocities(np.zeros((posw.shape[0], 3), np.float32))
-        d.init_mpi((0.0, 0.0, 0.0), (float(P.NX), float(P.NY), float(P.NZ)),
-                   (P.NX, P.NY, P.NZ), (False, False, False))
+        d.init_mpi((0.0, 0.0, 0.0), tuple(float(v) for v in P.extent), P.cells,
+                   (False, False, False))
         d.enable_mpi_step(2.0 * rp, rebalance_every=0)
     else:
         d.set_positions(posw)
         d.set_velocities(np.zeros((npart, 3), np.float32))
 
     cpl = CfdDem(s, d, fluid_dt=P.fluid_dt, mu=P.mu_g, rho=P.rho_g, radius=rp, drag="gidaspow",
-                 dem_substeps=P.dem_substeps, eps_min=0.4, periodic=(False, False, False),
+                 dem_substeps=P.dem_substeps, periodic=(False, False, False),
                  move_particles=True, porous=P.porous)
     return s, d, cpl, npart
 
@@ -188,7 +187,7 @@ def run(P=Params(), comm=None):
     rank = comm.Get_rank() if comm is not None else 0
     s, d, cpl, npart = build(P, comm)
     if rank == 0:
-        print(f"fluidized bed: {npart} grains, dp={P.dp} (cell/dp={1.0/P.dp:.0f}), R={P.R}, "
+        print(f"fluidized bed: {npart} grains, dp={P.dp} (cell/dp={s.spacing[0]/P.dp:.0f}), R={P.R}, "
               f"U={P.U_in}, Gidaspow drag", flush=True)
     h0 = bed_height(cpl, comm)
     for i in range(P.steps):

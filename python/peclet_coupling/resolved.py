@@ -33,9 +33,6 @@ FLOAT/DOUBLE BOUNDARY. dem carries float32 state, flow's scene is float64. The p
 rebuild converts; "zero-copy" is not literal across that divide, and does not need to be -- the
 instance array is a few hundred bytes per grain against a geometry rebuild measured in tens of ms.
 
-UNITS. Everything is in flow's grid units: cell spacing 1, cell (i,j,k) centred at (i,j,k), so dem
-positions and radii must be expressed in cells.
-
 HYDRODYNAMIC TORQUE (validated 2026-08-31). flow's reaction torque now carries the
 transposed-stress wall term (flow `16e91ec`) and is GATED: a spinning sphere reproduces the exact
 Stokes torque 8*pi*mu*a^3*Omega to +3.5/+2.4/+2.2% (converging with the aperture first moment),
@@ -48,30 +45,42 @@ apply_torque stays **off by default** for one remaining reason: dem assigns a DE
 inertia unrelated to the grain's size, so handing a torque to a grain whose inertia was never set
 spins it up at an arbitrary rate (the settling gate diverged to 1e+09 that way). Set the physical
 principal inertia FIRST -- (2/5) m R^2 for a sphere, or `scene_particle`'s `inv_inertia_unit` --
-then enable. The torque is computed and reported through `torques()` either way.
+then enable. The torque is computed and reported through `last_torque` either way.
 
+The keyword arguments are CfdDem's words for the same concepts: `rho` (the fluid density),
+`periodic=(bx, by, bz)` (per-axis, like every peclet `periodic=`), `move_particles`; the per-grain
+results are the `last_force` / `last_torque` arrays (N,3), like CfdDem's `last_drag` / `last_slip`.
 """
 import numpy as np
 
 
 class ResolvedCfdDem:
-    def __init__(self, flow, dem, *, radius, mu, rho_f, fluid_dt, dem_substeps=20,
-                 periodic=True, gravity=(0.0, 0.0, 0.0), rho_p=None, move=True,
-                 buoyancy=True, apply_torque=False,
+    def __init__(self, flow, dem, *, radius, mu, rho, fluid_dt, dem_substeps=20,
+                 periodic=(True, True, True), gravity=(0.0, 0.0, 0.0), rho_p=None,
+                 move_particles=True, buoyancy=True, apply_torque=False,
                  force_method="reaction"):
         self.flow = flow
         self.dem = dem
         self.mu = float(mu)
-        self.rho_f = float(rho_f)
+        self.rho = float(rho)
         self.fluid_dt = float(fluid_dt)
         self.dem_substeps = int(dem_substeps)
         self.dt_dem = self.fluid_dt / self.dem_substeps
         self.gravity = np.asarray(gravity, dtype=np.float64)
-        self.move = bool(move)
+        self.move_particles = bool(move_particles)
         self.buoyancy = bool(buoyancy)
         self.radius = float(radius)
         self.rho_p = float(rho_p) if rho_p is not None else None
-        self.periodic = bool(periodic)
+        # Per-axis flags, the suite's `periodic=` spelling. The flow scene's periodic images are
+        # all-or-nothing today (set_scene(periodic=bool) takes the min-image over the whole box),
+        # so a mixed triple has no faithful realisation and is refused rather than approximated.
+        if isinstance(periodic, bool) or len(periodic) != 3:
+            raise TypeError("periodic must be a 3-sequence of bools (bx, by, bz), like CfdDem's")
+        self.periodic = tuple(bool(p) for p in periodic)
+        if any(self.periodic) and not all(self.periodic):
+            raise ValueError(
+                f"ResolvedCfdDem: periodic={self.periodic} is mixed; the flow scene supports only "
+                "an all-periodic or a non-periodic box (set_scene periodic images are per box).")
         # Hand the reaction TORQUE to dem as well as the force (dem R2, set_external_torques).
         # The torque is VALIDATED (rotating-sphere + spin-decay gates, see the class docstring);
         # off by default only because dem's default inverse inertia is not the grain's -- set a
@@ -105,7 +114,8 @@ class ResolvedCfdDem:
         node_reals[14] = 1.0                                       # quaternion w
         node_reals[15] = 1.0                                       # scale
         ii, ir = self._instance_arrays()
-        self.flow.set_scene(node_ints, node_reals, ii.ravel(), ir.ravel(), periodic=self.periodic)
+        self.flow.set_scene(node_ints, node_reals, ii.ravel(), ir.ravel(),
+                            periodic=all(self.periodic))
         self._push_motion()
         self.flow.set_solid_from_scene(True)
 
@@ -134,7 +144,7 @@ class ResolvedCfdDem:
 
     # --- L4-R3: the motion loop ----------------------------------------------------------------
     def step(self):
-        if self.move:
+        if self.move_particles:
             self._push_motion()
             self.flow.rebuild_geometry()
         self.flow.step()
@@ -150,17 +160,17 @@ class ResolvedCfdDem:
             self.last_torque = np.array(ft[1][: self.n], dtype=np.float64)
             self.last_force_pressure = np.array(ft[2][: self.n], dtype=np.float64)
             self.last_force_viscous = np.array(ft[3][: self.n], dtype=np.float64)
-        if not self.move:
+        if not self.move_particles:
             return
         F = self.last_force.copy()
         if self.buoyancy and self.rho_p is not None:
             # The resolved traction already contains the hydrostatic part of the pressure field, so
             # what is added here is only the BODY force on the grain itself. Net gravity on a grain
-            # of density rho_p displacing rho_f is (rho_p - rho_f) V g when the fluid carries the
+            # of density rho_p displacing rho is (rho_p - rho) V g when the fluid carries the
             # hydrostatic gradient; when it does not (the usual periodic set-up, no gravity in the
             # fluid), the full rho_p V g applies. buoyancy=False selects the latter.
             V = 4.0 / 3.0 * np.pi * self.radius**3
-            F += (self.rho_p - self.rho_f) * V * self.gravity
+            F += (self.rho_p - self.rho) * V * self.gravity
         elif self.rho_p is not None:
             V = 4.0 / 3.0 * np.pi * self.radius**3
             F += self.rho_p * V * self.gravity
@@ -175,9 +185,3 @@ class ResolvedCfdDem:
             # (overlap removal only), so step() with no argument advances nothing and the driver
             # would run happily with a frozen particle.
             self.dem.step(self.dt_dem)
-
-    def forces(self):
-        return self.last_force
-
-    def torques(self):
-        return self.last_torque

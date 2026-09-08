@@ -1,10 +1,20 @@
-# peclet.coupling — unresolved point-particle CFD-DEM
+# peclet.coupling — CFD-DEM coupling, unresolved and resolved
 
-Two-way coupling of `peclet.flow` (Eulerian fluid) and `peclet.dem` (Lagrangian particles) for
-dilute-to-dense point-particle suspensions and packed beds. Multiphysics Phase 6 — see
-`../docs/MULTIPHYSICS_PLAN.md`.
+Two-way coupling of `peclet.flow` (Eulerian fluid) and `peclet.dem` (Lagrangian particles). Two
+drivers, one vocabulary:
 
-## Design
+- **`CfdDem`** — the **unresolved** point-particle driver for dilute-to-dense suspensions and packed
+  beds: a grain is a point with a drag closure (Multiphysics Phase 6, `../docs/MULTIPHYSICS_PLAN.md`).
+- **`ResolvedCfdDem`** — the **resolved** driver: each grain is an analytic SDF instance in the flow
+  solver's scene, the fluid resolves its surface, and there is no drag correlation anywhere
+  (see [Resolved coupling](#resolved-coupling-resolvedcfddem) below).
+
+Both live in the caller's own PHYSICAL units: the drivers take the cell size and the lower corner
+from the flow solver itself (`flow.spacing`, `flow.origin`), so a solver built with
+`Solver(cells, extent=...)` couples to a DEM stated in metres with no conversion anywhere, and a
+cell-unit solver (no extent) keeps spacing 1. Nothing in the coupling API is stated in cells.
+
+## Design (`CfdDem`)
 
 Physics-free glue. The compute kernels (particle↔grid deposition, drag laws, momentum feedback) live
 in the `_coupling` nanobind extension and run **in place** on the arrays the two solvers already
@@ -19,9 +29,15 @@ Per fluid step (`CfdDem.step()`):
    fold the ghost deposits (periodic wrap on periodic axes; **same-side fold onto the boundary cell
    at a non-periodic domain face** — a grain resting on the distributor scatters part of its volume
    below z=0, and that hold-up belongs to the bottom cell, not to a ghost the fluid never owns), and
-   `ε = clamp(1 − Vsolid/Vcell, eps_min, 1)`. The floor `eps_min` defaults to 0.4 ≈ the
-   random-close-packing voidage (the drag correlations are invalid, and Ergun's `1/ε` powers
-   explosive, below a physical packing). A particle whose trilinear stencil falls **outside the
+   `ε = clamp(1 − Vsolid/Vcell, eps_min, 1)`. The floor `eps_min` defaults to **0.25**, a physical
+   regularisation rather than a guard: real voidage bottoms out near random close packing (~0.36
+   monodisperse, ~0.25 for wide bidisperse mixes), and anything lower can only come from
+   interpenetrated particles or deposit artefacts and must not reach the volume-averaged fluid
+   (whose projection amplifies the interstitial velocity by `1/ε`). The older 0.4 floor
+   under-predicted dense-bed drag ~3x; the interim 0.05 guard let interpenetration artefacts
+   detonate a bed. The same 0.25 is the kernel default (`_coupling.compute_void_fraction`); the
+   fixed-bed tests pass `eps_min=0.05` explicitly because their uniform lattice never clamps.
+   A particle whose trilinear stencil falls **outside the
    domain by more than one ghost layer** (e.g. pushed through a DEM wall by a violent contact solve)
    is dropped from the exchange entirely — no deposit, zero drag — so a runaway escapee can never
    feed a diverging `β·u_p` source into the boundary row.
@@ -30,13 +46,15 @@ Per fluid step (`CfdDem.step()`):
    diameter — the point-particle approximation is what needs `δ_f ≫ d_p`, and it must not move
    when the mesh does. It is realised as `n` explicit diffusion sweeps with a per-axis coefficient
    `α_a = C/h_a²`, `C = 1/(2 Σ_a 1/h_a²)`, `n = round(σ² Σ_a 1/h_a²)`, so the Gaussian is a ball
-   in space and not in index — on a cubic mesh that reduces to `α = 1/6`, `n = round(3 w²)`, the
-   older `smooth_width` (cells) formula term for term and bit for bit. Gate:
+   in space and not in index — on a cubic mesh that reduces to `α = 1/6`, `n = round(3 (σ/h)²)`,
+   term for term and bit for bit the cubic formula it generalises. Gate:
    `tests/test_smoothing_isotropy.py` (three physical `σ` equal to 8.9e-10 on a `(1, 2, 0.5)` cell,
    the single-`α` ablation off by exactly the spacing ratios, the cubic mesh bitwise).
 2. **Drag + feedback** — gather the fluid velocity and ε at each particle, evaluate the drag law
-   (Stokes / Schiller–Naumann / Ergun / Di Felice / Wen & Yu / Gidaspow), write the drag force to the
-   particles and deposit the reaction onto the fluid momentum source.
+   (`"stokes"`, `"schiller_naumann"`, `"ergun"`, `"di_felice"`, `"wen_yu"`, `"gidaspow"`,
+   `"beetstra"` — Beetstra–van der Hoef–Kuipers 2007, `"tang"` — Tang et al. 2015; one literature
+   name each), write the drag force to the particles and deposit the reaction onto the fluid
+   momentum source.
 3. **Advance** — apply the drag to the particles and sub-step dem `dem_substeps` times (drag held
    constant), then advance the fluid one step (its RHS/operator now carry the feedback).
 
@@ -66,6 +84,32 @@ explicit `−F/Vcell` feedback (dilute only).
 Other scope notes: deposition uses `atomic_add` ⇒ results are tolerance-, not bit-exact; the `"ergun"`
 drag *kind* is the superficial-velocity form built for the incompressible mode — for porous beds use
 `"gidaspow"` (its dense branch is the classic interstitial Ergun form).
+
+## Resolved coupling (`ResolvedCfdDem`)
+
+`ResolvedCfdDem(flow, dem, *, radius, mu, rho, fluid_dt, dem_substeps=20, periodic=(bx, by, bz),
+gravity=(0, 0, 0), rho_p=None, move_particles=True, buoyancy=True, apply_torque=False,
+force_method="reaction")` is Layer 4 of `../docs/ANALYTIC_SDF_GEOMETRY.md`: one `kSphere` scene
+node, one instance per grain, installed in the flow solver's scene (`set_scene`). Per coupling
+step it pushes dem's positions / quaternions / velocities / angular velocities into the scene as
+instance transforms + rigid-body motion, `flow.rebuild_geometry()` re-derives the SDF, cut-cell
+overlay, apertures and pressure operator, the fluid steps, and the hydrodynamic load comes back —
+by default the **discrete reaction** (the momentum the fluid actually lost to each grain, exactly
+conservative), or the reconstructed traction integral with `force_method="traction"` (a
+diagnostic; it under-reads the drag by a resolution-independent ~29 %). Gravity/buoyancy is added
+(`rho_p`, `buoyancy`), the force (and, with `apply_torque=True`, the torque) is handed to dem, and
+dem sub-steps at the DEM timestep with the load held constant (weak, explicit coupling: the fluid
+load is lagged by one fluid step). Pure Python — no compiled kernels of its own, so it imports even
+without the `_coupling` extension.
+
+The bridge is a pure identity in the caller's units (dem state in, force and torque out; no scale
+factor anywhere). The hydrodynamic torque is validated (a spinning sphere reproduces the Stokes
+torque `8πμa³Ω` to ~2–3 %) but `apply_torque` is **off by default**: dem's default inverse inertia is
+not the grain's, so set the physical principal inertia (`(2/5) m R²` for a sphere) before enabling
+it. The per-grain results of the last step are the `last_force` / `last_torque` `(N,3)` arrays
+(traction mode also fills `last_force_pressure` / `last_force_viscous`). `periodic` is per-axis like
+everywhere else in peclet, but the flow scene's periodic images are all-or-nothing, so a mixed
+triple is refused. Gallery: `peclet-examples/examples/rotating-sphere-torque`.
 
 ## Backends
 
@@ -129,11 +173,17 @@ driver uses the zero-copy device *views* throughout and exposes `last_slip` for 
 
 ```bash
 cmake -S . -B build -DCMAKE_PREFIX_PATH="$PWD/../extern/install/host-openmp"
-cmake --build build -j        # -> build/peclet/coupling/_coupling.*.so
-# run the tests (all three build trees on PYTHONPATH):
-PYTHONPATH="$PWD/build:$PWD/../flow/build:$PWD/../dem/build" \
-  python tests/test_fixed_bed_ergun.py
+cmake --build build -j        # -> build/peclet/coupling/_coupling.*.so (+ the staged .py files)
+# run the tests (all three build trees on PYTHONPATH); each test is a pytest function AND a script:
+export PYTHONPATH="$PWD/build:$PWD/../flow/build:$PWD/../dem/build"
+OMP_NUM_THREADS=4 OMP_PROC_BIND=false pytest tests -q -k "terminal or ergun or isotropy"
+python tests/test_fixed_bed_ergun.py
+# the test_mpi_*.py tests need an MPI build of flow + dem and mpi4py (they SKIP under pytest else):
+mpirun -np 2 python tests/test_mpi_fixed_bed_ergun.py
 ```
+
+CI (`.github/workflows/ci.yml`) builds Kokkos (OpenMP), flow, dem and coupling from source and runs
+the single-rank pytest battery on every push.
 
 ## Follow-ups
 

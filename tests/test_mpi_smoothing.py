@@ -1,7 +1,7 @@
 """Multi-rank void-fraction SMOOTHING: distributed diffusive smoothing must reproduce the
 single-rank result exactly.
 
-The MFIX-style diffusive smoothing (smooth_width) was single-rank-only: the sweep treated every
+The MFIX-style diffusive smoothing (smooth_length) was single-rank-only: the sweep treated every
 local block face as a zero-flux wall, so a rank boundary acted as a spurious internal wall. Now
 interior rank faces read the halo ghost (open_faces mask) and the driver refreshes the solidvol
 halo before every Jacobi sweep, which makes the multi-rank sweep arithmetic identical to the
@@ -20,12 +20,23 @@ import numpy as np
 import peclet.flow
 import peclet.dem
 from peclet.coupling import CfdDem
-from mpi4py import MPI
+try:
+    from mpi4py import MPI
+except ImportError:  # a host without mpi4py: the pytest entry skips, the script entry fails loudly
+    MPI = None
+
+
+def _require_mpi():
+    """The distributed tests need flow's MPI build + mpi4py; under pytest they SKIP otherwise
+    (never silently green), as a script they still run: mpirun -np N python <this file>."""
+    if MPI is None or not getattr(peclet.flow, "has_mpi", False):
+        import pytest
+        pytest.skip("needs mpi4py + a PECLET_FLOW_MPI build of peclet.flow (run: mpirun -np N python ...)")
 
 REF_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smoothing_ref_eps.npy")
 N = 16          # global grid N^3, h = 1
 R = 0.3         # particle radius
-SMOOTH_W = 2.0  # smoothing length in cells
+SMOOTH_LEN = 2.0  # smoothing length (physical; h = 1 here, so 2 cells)
 EPS_MIN = 0.05
 
 
@@ -58,15 +69,14 @@ def run(comm):
     s.set_pressure_geometry(np.asfortranarray(np.full((lnx, lny, lnz), 10.0)))
 
     d = peclet.dem.Simulation(max(Np, 1))
-    d.initialize(shape_type=1, radius=R)
-    d.set_domain((0, 0, 0), (N, N, N))
-    d.enable_periodicity(True, True, True)
+    d.initialize_shape(1, radius=R)
+    d.set_domain(extent=(N, N, N), periodic=(True, True, True))
     posw = np.concatenate([mine, np.zeros((Np, 1), dtype=np.float32)], axis=1)  # invMass 0: fixed
     d.set_positions(posw)
     d.set_velocities(np.zeros((Np, 3), dtype=np.float32))
 
     cpl = CfdDem(s, d, fluid_dt=0.1, mu=1.0, rho=1.0, radius=R, drag="stokes",
-                 eps_min=EPS_MIN, smooth_width=SMOOTH_W, move_particles=False)
+                 eps_min=EPS_MIN, smooth_length=SMOOTH_LEN, move_particles=False)
     assert cpl._smooth_sweeps > 0, "smoothing must be active under MPI now"
     cpl._resize_particles(Np)
     cpl.update_void_fraction(cpl.xp.asarray(mine))
@@ -110,5 +120,10 @@ def run(comm):
         raise SystemExit(1)
 
 
-if __name__ == "__main__":
+def test_mpi_smoothing():
+    _require_mpi()
     run(MPI.COMM_WORLD)
+
+
+if __name__ == "__main__":
+    test_mpi_smoothing()

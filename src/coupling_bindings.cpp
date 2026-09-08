@@ -120,8 +120,9 @@ NB_MODULE(_coupling, m) {
         peclet::coupling::voidFraction(flatField(solidvol, "solidvol"), flatField(eps, "eps"),
                                        inv_vcell, eps_min);
       },
-      nb::arg("solidvol"), nb::arg("eps"), nb::arg("inv_vcell"), nb::arg("eps_min") = 0.2,
-      "eps = clamp(1 - solidvol/Vcell, eps_min, 1), elementwise on the flat padded buffers.");
+      nb::arg("solidvol"), nb::arg("eps"), nb::arg("inv_vcell"), nb::arg("eps_min") = 0.25,
+      "eps = clamp(1 - solidvol/Vcell, eps_min, 1), elementwise on the flat padded buffers. The "
+      "default floor 0.25 is the one CfdDem uses (a wide bidisperse random close packing).");
 
   m.def(
       "interpolate_velocity",
@@ -166,7 +167,7 @@ NB_MODULE(_coupling, m) {
       nb::arg("ez"), nb::arg("g"), nb::arg("mu"), nb::arg("rho"), nb::arg("inv_vcell"),
       nb::arg("drag_kind"), nb::arg("model_b") = false, nb::arg("dt_exch") = 0.0, nb::arg("gx") = 0.0, nb::arg("gy") = 0.0, nb::arg("gz") = 0.0,
       "Gather (uf,vf,wf,eps) at each particle, evaluate the drag law (0 Stokes, 1 Schiller-Naumann, "
-      "2 Ergun, 3 Di Felice, 4 Wen-Yu, 5 Gidaspow, 6 Beetstra/BVK), write the drag force to `fdrag` "
+      "2 Ergun, 3 Di Felice, 4 Wen-Yu, 5 Gidaspow, 6 Beetstra, 7 Tang), write the drag force to `fdrag` "
       "(N,3) and the reaction force density "
       "-F/Vcell onto (fx,fy,fz) (zeroed here). Momentum-conserving. EXPLICIT feedback — use "
       "compute_drag_implicit for stiff (dense-bed) drag.");

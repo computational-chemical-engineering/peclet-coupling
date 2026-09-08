@@ -16,7 +16,7 @@ result in physical length. Three checks:
   C. a CUBIC mesh with the per-axis coefficients is BITWISE the single-alpha kernel — the isotropic
      path is untouched, which is what `alpha_y`/`alpha_z < 0` (the "same as alpha" sentinel) buys.
 
-Run: PYTHONPATH=<coupling build> python tests/test_smoothing_isotropy.py
+Run: PYTHONPATH=<coupling build> python tests/test_smoothing_isotropy.py   (or pytest)
 """
 import numpy as np
 from peclet.coupling import _coupling as C
@@ -46,37 +46,42 @@ def sigmas(f, h):
     return tot, out
 
 
-ok = True
-inv2 = sum(1.0 / (x * x) for x in H)
-Cc = 1.0 / (2.0 * inv2)
-alpha = tuple(Cc / (x * x) for x in H)
-sig_exact = np.sqrt(2.0 * Cc * NSWEEP)
+def test_smoothing_isotropy():
+    ok = True
+    inv2 = sum(1.0 / (x * x) for x in H)
+    Cc = 1.0 / (2.0 * inv2)
+    alpha = tuple(Cc / (x * x) for x in H)
+    sig_exact = np.sqrt(2.0 * Cc * NSWEEP)
 
-tot, s = sigmas(smooth(alpha[0], alpha[1:]), H)
-spread = (max(s) - min(s)) / np.mean(s)
-err = max(abs(v / sig_exact - 1.0) for v in s)
-print(f"A per-axis alpha={tuple(round(v, 6) for v in alpha)}  sigma_phys="
-      f"{[round(v, 6) for v in s]}  target {sig_exact:.6f}")
-print(f"  anisotropy {spread:.3e} (gate 1e-6)   error vs sqrt(2 C n) {err:.3e} (gate 1e-6)"
-      f"   mass {tot:.15f}")
-ok &= spread < 1e-6 and err < 1e-6 and abs(tot - 1.0) < 1e-12
+    tot, s = sigmas(smooth(alpha[0], alpha[1:]), H)
+    spread = (max(s) - min(s)) / np.mean(s)
+    err = max(abs(v / sig_exact - 1.0) for v in s)
+    print(f"A per-axis alpha={tuple(round(v, 6) for v in alpha)}  sigma_phys="
+          f"{[round(v, 6) for v in s]}  target {sig_exact:.6f}")
+    print(f"  anisotropy {spread:.3e} (gate 1e-6)   error vs sqrt(2 C n) {err:.3e} (gate 1e-6)"
+          f"   mass {tot:.15f}")
+    ok &= spread < 1e-6 and err < 1e-6 and abs(tot - 1.0) < 1e-12
 
-_, s1 = sigmas(smooth(1.0 / 6.0, (-1.0, -1.0)), H)
-ratio = [s1[a] / s1[0] for a in range(3)]
-want = [H[a] / H[0] for a in range(3)]
-print(f"B one alpha (ABLATION)      sigma_phys={[round(v, 6) for v in s1]}")
-print(f"  ratios {[round(v, 4) for v in ratio]} vs the spacings {want} -> the filter is a box, "
-      f"not a ball")
-ok &= max(abs(ratio[a] - want[a]) for a in range(3)) < 1e-2
+    _, s1 = sigmas(smooth(1.0 / 6.0, (-1.0, -1.0)), H)
+    ratio = [s1[a] / s1[0] for a in range(3)]
+    want = [H[a] / H[0] for a in range(3)]
+    print(f"B one alpha (ABLATION)      sigma_phys={[round(v, 6) for v in s1]}")
+    print(f"  ratios {[round(v, 4) for v in ratio]} vs the spacings {want} -> the filter is a box, "
+          f"not a ball")
+    ok &= max(abs(ratio[a] - want[a]) for a in range(3)) < 1e-2
 
-cub = (1.0, 1.0, 1.0)
-a_c = tuple(1.0 / (2.0 * 3.0) / 1.0 for _ in cub)
-f_per = smooth(a_c[0], a_c[1:])
-f_one = smooth(1.0 / 6.0, (-1.0, -1.0))
-bit = np.array_equal(np.asarray(f_per).view(np.uint64), np.asarray(f_one).view(np.uint64))
-print(f"C cubic mesh: per-axis == single-alpha BITWISE: {bit}  "
-      f"max|d| {np.max(np.abs(np.asarray(f_per) - np.asarray(f_one))):.3e}")
-ok &= bit
+    cub = (1.0, 1.0, 1.0)
+    a_c = tuple(1.0 / (2.0 * 3.0) / 1.0 for _ in cub)
+    f_per = smooth(a_c[0], a_c[1:])
+    f_one = smooth(1.0 / 6.0, (-1.0, -1.0))
+    bit = np.array_equal(np.asarray(f_per).view(np.uint64), np.asarray(f_one).view(np.uint64))
+    print(f"C cubic mesh: per-axis == single-alpha BITWISE: {bit}  "
+          f"max|d| {np.max(np.abs(np.asarray(f_per) - np.asarray(f_one))):.3e}")
+    ok &= bit
 
-print("SMOOTHING ISOTROPY:", "PASS" if ok else "FAIL")
-raise SystemExit(0 if ok else 1)
+    print("SMOOTHING ISOTROPY:", "PASS" if ok else "FAIL")
+    assert ok
+
+
+if __name__ == "__main__":
+    test_smoothing_isotropy()

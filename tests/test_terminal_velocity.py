@@ -21,9 +21,8 @@ def terminal(drag, g=1e-3, r=1.0, mu=1.0, rho_p=1.0, rho_f=1.0, N=32, steps=120)
     s.set_rho(rho_f); s.set_mu(mu); s.set_dt(0.1)
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, N), 10.0)))
     d = peclet.dem.Simulation(1)
-    d.initialize(shape_type=1, radius=r)
-    d.set_domain((0, 0, 0), (N, N, N))
-    d.enable_periodicity(True, True, True)
+    d.initialize_shape(1, radius=r)
+    d.set_domain(extent=(N, N, N), periodic=(True, True, True))
     d.set_gravity(0, 0, -g)  # acceleration
     d.set_positions(np.array([[N / 2, N / 2, N / 2, 1.0 / m_p]], dtype=np.float32))  # w = invMass
     d.set_velocities(np.zeros((1, 3), dtype=np.float32))
@@ -54,7 +53,7 @@ def schiller_ref(g, r, mu, rho_p, rho_f):
     return v, rho_f * 2 * r * v / mu
 
 
-if __name__ == "__main__":
+def test_terminal_velocity():
     # Stokes: deep Stokes regime, expect < 1% (v_t and the drag balance are both linear here)
     vt = stokes_ref(1e-3, 1.0, 1.0, 1.0)
     slip, fmag, ufm, m_p = terminal("stokes", g=1e-3)
@@ -71,3 +70,7 @@ if __name__ == "__main__":
           f"fluid|u|max={ufm2:.2e}")
     assert err2 < 0.05, f"Schiller-Naumann terminal slip off by {err2*100:.2f}%"
     print("PHASE 6 TERMINAL VELOCITY: PASS")
+
+
+if __name__ == "__main__":
+    test_terminal_velocity()

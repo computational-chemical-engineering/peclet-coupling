@@ -41,5 +41,5 @@ try:
 except Exception:  # PackageNotFoundError (dev build), or a broken metadata install
     __version__ = "0+unknown"
 
-__all__ = ["CfdDem", "ResolvedCfdDem", "_coupling", "DRAG_STOKES", "DRAG_SCHILLER_NAUMANN", "DRAG_ERGUN",
+__all__ = ["CfdDem", "ResolvedCfdDem", "DRAG_STOKES", "DRAG_SCHILLER_NAUMANN", "DRAG_ERGUN",
            "DRAG_DI_FELICE", "DRAG_WEN_YU", "DRAG_GIDASPOW", "DRAG_BEETSTRA", "DRAG_TANG"]

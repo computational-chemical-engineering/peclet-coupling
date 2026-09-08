@@ -23,7 +23,18 @@ import numpy as np
 import peclet.flow
 import peclet.dem
 from peclet.coupling import CfdDem
-from mpi4py import MPI
+try:
+    from mpi4py import MPI
+except ImportError:  # a host without mpi4py: the pytest entry skips, the script entry fails loudly
+    MPI = None
+
+
+def _require_mpi():
+    """The distributed tests need flow's MPI build + mpi4py; under pytest they SKIP otherwise
+    (never silently green), as a script they still run: mpirun -np N python <this file>."""
+    if MPI is None or not getattr(peclet.flow, "has_mpi", False):
+        import pytest
+        pytest.skip("needs mpi4py + a PECLET_FLOW_MPI build of peclet.flow (run: mpirun -np N python ...)")
 
 
 def run(comm, N=32, r=0.7, steps=6, v0=-6.0):
@@ -49,9 +60,8 @@ def run(comm, N=32, r=0.7, steps=6, v0=-6.0):
     posw = np.concatenate([mine, np.full((Np, 1), 1.0 / m_p, dtype=np.float32)], axis=1)
 
     d = peclet.dem.Simulation(6 * 36 + 64)
-    d.initialize(shape_type=1, radius=r)
-    d.set_domain((0, 0, 0), (N, N, N))
-    d.enable_periodicity(True, True, True)
+    d.initialize_shape(1, radius=r)
+    d.set_domain(extent=(N, N, N), periodic=(True, True, True))
     d.set_gravity(0.0, 0.0, 0.0)
     vel = np.zeros((Np, 3), dtype=np.float32); vel[:, 0] = v0
     d.set_positions(posw); d.set_velocities(vel)
@@ -76,7 +86,8 @@ def run(comm, N=32, r=0.7, steps=6, v0=-6.0):
     return gv / gn, comm.allreduce(1 if crossed else 0, MPI.MAX)
 
 
-if __name__ == "__main__":
+def test_mpi_moving_suspension():
+    _require_mpi()
     comm = MPI.COMM_WORLD
     rank, size = comm.Get_rank(), comm.Get_size()
     mean_vx, crossed = run(comm)
@@ -94,5 +105,8 @@ if __name__ == "__main__":
     if rank == 0:
         print(f"[np={size}] mean_vx={mean_vx:.8e}  migrated={bool(crossed)}  {tag}")
         print(f"MPI MOVING SUSPENSION (np={size}): {'PASS' if ok else 'FAIL'}")
-    import sys
-    sys.exit(0 if comm.allreduce(1 if ok else 0, MPI.MIN) else 1)
+    assert comm.allreduce(1 if ok else 0, MPI.MIN)
+
+
+if __name__ == "__main__":
+    test_mpi_moving_suspension()

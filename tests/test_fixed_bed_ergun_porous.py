@@ -42,9 +42,8 @@ def run_bed(f_drive, eps_target=0.6, N=16, mu=1.0, rho=1.0, dt=0.5, steps=120):
     s.set_body_force(0.0, 0.0, f_drive)
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, N), 10.0)))
     d = peclet.dem.Simulation(Np)
-    d.initialize(shape_type=1, radius=r)
-    d.set_domain((0, 0, 0), (N, N, N))
-    d.enable_periodicity(True, True, True)
+    d.initialize_shape(1, radius=r)
+    d.set_domain(extent=(N, N, N), periodic=(True, True, True))
     d.set_positions(posw)
     d.set_velocities(np.zeros((Np, 3), dtype=np.float32))
     cpl = CfdDem(s, d, fluid_dt=dt, mu=mu, rho=rho, radius=r, drag="gidaspow", eps_min=0.05,
@@ -57,7 +56,7 @@ def run_bed(f_drive, eps_target=0.6, N=16, mu=1.0, rho=1.0, dt=0.5, steps=120):
     return U, ui, eps_mean, ergun(U, eps_mean, mu, rho, 2 * r)
 
 
-if __name__ == "__main__":
+def test_fixed_bed_ergun_porous():
     print("f_drive     U(superf)   u_i       eps    Ergun(U,eps)  rel-err")
     ok = True
     for f_drive in (0.2, 20.0, 1000.0):
@@ -67,3 +66,7 @@ if __name__ == "__main__":
         ok = ok and err < 0.10
     assert ok, "porous fixed-bed drag does not reproduce Ergun within 10%"
     print("POROUS FIXED-BED ERGUN: PASS")
+
+
+if __name__ == "__main__":
+    test_fixed_bed_ergun_porous()

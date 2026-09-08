@@ -14,7 +14,18 @@ import numpy as np
 import peclet.flow
 import peclet.dem
 from peclet.coupling import CfdDem
-from mpi4py import MPI
+try:
+    from mpi4py import MPI
+except ImportError:  # a host without mpi4py: the pytest entry skips, the script entry fails loudly
+    MPI = None
+
+
+def _require_mpi():
+    """The distributed tests need flow's MPI build + mpi4py; under pytest they SKIP otherwise
+    (never silently green), as a script they still run: mpirun -np N python <this file>."""
+    if MPI is None or not getattr(peclet.flow, "has_mpi", False):
+        import pytest
+        pytest.skip("needs mpi4py + a PECLET_FLOW_MPI build of peclet.flow (run: mpirun -np N python ...)")
 
 
 def ergun(U, eps, mu, rho, d):
@@ -50,9 +61,8 @@ def run_bed(f_drive, comm, eps_target=0.6, N=16, mu=1.0, rho=1.0, dt=0.5, steps=
     s.set_pressure_geometry(np.asfortranarray(np.full((lnx, lny, lnz), 10.0)))
 
     d = peclet.dem.Simulation(max(Np, 1))
-    d.initialize(shape_type=1, radius=r)
-    d.set_domain((0, 0, 0), (N, N, N))
-    d.enable_periodicity(True, True, True)
+    d.initialize_shape(1, radius=r)
+    d.set_domain(extent=(N, N, N), periodic=(True, True, True))
     d.set_positions(posw)
     d.set_velocities(np.zeros((Np, 3), dtype=np.float32))
 
@@ -73,7 +83,8 @@ def run_bed(f_drive, comm, eps_target=0.6, N=16, mu=1.0, rho=1.0, dt=0.5, steps=
     return U, eps_mean, ergun(U, eps_mean, mu, rho, 2 * r), r
 
 
-if __name__ == "__main__":
+def test_mpi_fixed_bed_ergun():
+    _require_mpi()
     comm = MPI.COMM_WORLD
     rank, size = comm.Get_rank(), comm.Get_size()
     if rank == 0:
@@ -90,5 +101,8 @@ if __name__ == "__main__":
     ok = comm.allreduce(1 if ok else 0, MPI.MIN)
     if rank == 0:
         print(f"MPI FIXED-BED ERGUN (np={size}): {'PASS' if ok else 'FAIL'}")
-    import sys
-    sys.exit(0 if ok else 1)
+    assert ok
+
+
+if __name__ == "__main__":
+    test_mpi_fixed_bed_ergun()
