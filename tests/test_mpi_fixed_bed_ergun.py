@@ -4,9 +4,9 @@ The single-rank fixed-bed Ergun benchmark (test_fixed_bed_ergun.py) run across M
 solver is decomposed (Solver.init_mpi), each rank holds the lattice particles in its ORB block, and
 the coupling deposits/gathers on the LOCAL block with a block-origin-shifted grid map — cross-rank +
 periodic ghost deposits (void fraction + drag reaction) fold onto their owner via the reverse
-(add-reduce) halo (flow.exchange_field_add). The measured superficial velocity U (reduced over ranks)
-must land on the same Ergun curve as single-rank, proving the distributed deposition + fold + solve
-reproduce the coupled physics.
+(add-reduce) halo (flow.diagnostics.exchange_field_add). The measured superficial velocity U
+(reduced over ranks) must land on the same Ergun curve as single-rank, proving the distributed
+deposition + fold + solve reproduce the coupled physics.
 
 Run:  mpirun -np {1,2,4} python test_mpi_fixed_bed_ergun.py
 """

@@ -18,7 +18,7 @@ cell-unit solver (no extent) keeps spacing 1. Nothing in the coupling API is sta
 
 Physics-free glue. The compute kernels (particle↔grid deposition, drag laws, momentum feedback) live
 in the `_coupling` nanobind extension and run **in place** on the arrays the two solvers already
-expose — the fluid grid fields zero-copy through `flow.field_view(...)`, the particle drag
+expose — the fluid grid fields zero-copy through `flow.diagnostics.field_view(...)`, the particle drag
 round-tripped through the dem host API. **There is no C++ link between flow and dem**: the Python
 `CfdDem` driver (`python/peclet_coupling/driver.py`) composes them. This mirrors the suite's
 architecture (Python is the composition layer).
@@ -115,7 +115,7 @@ triple is refused. Gallery: `peclet-examples/examples/rotating-sphere-torque`.
 
 `CfdDem` runs on whatever Kokkos backend `peclet.flow` was built for. On a **CUDA/HIP** build the
 coupling kernels run on-device, so the driver array-programs through **CuPy** and takes the grid
-fields (`flow.field_view`) and particle state (`dem.get_*_view`) zero-copy via DLPack; on a host
+fields (`flow.diagnostics.field_view`) and particle state (`dem.get_*_view`) zero-copy via DLPack; on a host
 build it uses NumPy over the same buffers. Detected automatically from `peclet.flow.execution_space`.
 
 ## Validation (`tests/`)
@@ -133,7 +133,7 @@ Both cases pass identically on **host-openmp and CUDA (RTX 5080)**:
   interstitial kinematics and the `β_B = β_A/ε` conversion together.
 - **`test_mpi_fixed_bed_ergun.py`** — the fixed-bed Ergun benchmark run **distributed** (flow
   `init_mpi`, each rank couples its ORB block; particle deposits fold across ranks + periodically via
-  the reverse/add-reduce halo `exchange_field_add`, deposit origin shifted by the block origin). The
+  the reverse/add-reduce halo `diagnostics.exchange_field_add`, deposit origin shifted by the block origin). The
   superficial velocity U (reduced over ranks) lands on the Ergun curve to **0.0 %** and is
   **bit-identical at np=1/2/4** — the distributed deposition + fold + solve reproduce the coupled
   physics exactly.
@@ -144,10 +144,10 @@ Both cases pass identically on **host-openmp and CUDA (RTX 5080)**:
 `CfdDem` runs distributed when the flow solver is decomposed (`flow.init_mpi(...)`, world size > 1):
 each rank couples its **local block**, the deposit grid map is shifted by the block origin (so
 particles in global coordinates land locally), and cross-rank + periodic ghost deposits (void
-fraction + drag reaction) fold onto their owner with the reverse halo (`exchange_field_add`) instead
+fraction + drag reaction) fold onto their owner with the reverse halo (`diagnostics.exchange_field_add`) instead
 of the single-rank NumPy fold. `CfdDem.rebalance(gamma)` forms one weight field
 (`1 + gamma * particle_count`) and redistributes BOTH codes onto the same weighted ORB
-(`flow.rebalance_by_weights` + `dem.migrate_to_weights`). Give the flow + dem the same decomposition
+(`flow.diagnostics.rebalance_by_weights` + `dem.migrate_to_weights`). Give the flow + dem the same decomposition
 (matching grid dims / domain) before constructing `CfdDem`.
 
 **Moving particles** (`move_particles=True`): each fluid step `CfdDem` first migrates dem onto flow's

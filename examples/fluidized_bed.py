@@ -117,10 +117,10 @@ def build(P, comm=None):
     else:
         s = peclet.flow.Solver(P.cells, extent=P.extent)
     s.set_rho(P.rho_g); s.set_mu(P.mu_g); s.set_dt(P.fluid_dt)
-    s.set_domain_bc(4, 2, 0.0, 0.0, P.U_in)   # -z face: inflow, gas velocity U up
-    s.set_domain_bc(5, 3)                      # +z face: outflow
-    for face in (0, 1, 2, 3):
-        s.set_domain_bc(face, 1)               # x/y faces: no-slip (fluid never reaches them)
+    s.set_domain_bc('-z', 'inflow', 0.0, 0.0, P.U_in)   # -z face: inflow, gas velocity U up
+    s.set_domain_bc('+z', 'outflow')                     # +z face: outflow
+    for face in ('-x', '+x', '-y', '+y'):
+        s.set_domain_bc(face, 'wall')          # x/y faces: no-slip (fluid never reaches them)
     # The geometric MG-PCG stalls at ~6e-3 divergence on this cut-cell cylinder + inflow/outflow, so
     # the default 500-iteration cap just burns iterations with no further progress. Cap it: same bed,
     # ~10x faster flow step. (A tighter algebraic pressure solve for this geometry is a follow-up.)

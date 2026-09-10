@@ -13,7 +13,7 @@ centred at i + 1/2 — bit for bit. Each fluid step:
   3. apply F to the particles and advance dem `dem_substeps` sub-steps (drag held constant);
   4. advance the fluid one step (its momentum RHS now carries the feedback).
 
-The grid fields are touched zero-copy through flow.field_view(...); the particle drag is
+The grid fields are touched zero-copy through flow.diagnostics.field_view(...); the particle drag is
 round-tripped through the dem host API (set_external_forces). Periodic ghost handling (fold for
 deposits, fill for reads) is done here in NumPy on the padded (ex,ey,ez) buffers.
 """
@@ -37,9 +37,13 @@ class CfdDem:
         self._c = _coupling
         self.flow = flow
         self.dem = dem
+        # peclet.flow 1.0.0 (QUALITY_PLAN F): field_view/exchange_field(_add)/rebalance_by_weights
+        # moved to the developer tier, `Solver.diagnostics` -- a property holding a reference to
+        # this solver, so caching it once here is equivalent to calling flow.diagnostics each time.
+        self._diag = flow.diagnostics
         # THE UNIT LAYER (suite/docs/PHYSICAL_UNITS_PLAN.md §3.2). The flow solver computes on the
         # UNIT LATTICE and folds the metric into constants at its own API boundary — but the arrays
-        # this driver reaches through the RAW field registry (field_view: u/v/w, force_*,
+        # this driver reaches through the RAW field registry (diagnostics.field_view: u/v/w, force_*,
         # drag_beta) are the internal ones, not the converted get_u/get_p. So the driver poses the
         # WHOLE coupling in the solver's internal units: particle positions become index
         # coordinates, velocities index velocities, mu/rho/gravity/dt the solver's own, and the
@@ -294,9 +298,9 @@ class CfdDem:
             self._rad = xp.full(n, self._radius0, dtype=xp.float32)
 
     # Grid field as a device/host array over the SAME buffer (zero-copy): CuPy on a GPU build
-    # (field_view returns a DLPack capsule), NumPy on a host build.
+    # (diagnostics.field_view returns a DLPack capsule), NumPy on a host build.
     def _fv(self, name):
-        v = self.flow.field_view(name)
+        v = self._diag.field_view(name)
         return self.xp.from_dlpack(v) if self.device else v
 
     # Particle positions + velocities as C-contiguous device/host (N,3) arrays (device views are
@@ -335,7 +339,7 @@ class CfdDem:
 
     def _fold_domain(self, f):
         """MPI: same-side fold of the non-periodic GLOBAL-domain-boundary ghosts of the local
-        block (the reverse halo never touches them). Call BEFORE exchange_field_add."""
+        block (the reverse halo never touches them). Call BEFORE diagnostics.exchange_field_add."""
         g = self.g
         lo = self._blo
         dims = (self.nx, self.ny, self.nz)
@@ -365,7 +369,7 @@ class CfdDem:
 
     def _fill_domain(self, f):
         """MPI: zero-gradient fill of the non-periodic global-domain-boundary ghosts (the halo
-        fill never touches them). Call AFTER exchange_field."""
+        fill never touches them). Call AFTER diagnostics.exchange_field."""
         g = self.g
         lo = self._blo
         dims = (self.nx, self.ny, self.nz)
@@ -391,7 +395,7 @@ class CfdDem:
             self._c.deposit_solid_volume(pos, self._rad, sv, self._fv("sdf"), *self._gm())
         if self.mpi:
             self._fold_domain(sv)  # non-periodic domain-boundary ghosts (halo never folds them)
-            self.flow.exchange_field_add("solidvol")  # fold cross-rank + periodic ghost deposits
+            self._diag.exchange_field_add("solidvol")  # fold cross-rank + periodic ghost deposits
         else:
             self._fold(sv)
         if self._smooth_sweeps:
@@ -404,7 +408,7 @@ class CfdDem:
                 # reproduces the single-rank closed-box arithmetic exactly (global faces stay
                 # zero-flux, flux across rank faces is antisymmetric => volume conserved).
                 for _ in range(self._smooth_sweeps):
-                    self.flow.exchange_field("solidvol")
+                    self._diag.exchange_field("solidvol")
                     self._c.smooth_solid_volume(sv, *self._gm(), 1, self._smooth_alpha[0],
                                                 self._smooth_open, *self._smooth_ayz)
             else:
@@ -412,7 +416,7 @@ class CfdDem:
                                             self._smooth_alpha[0], 0, *self._smooth_ayz)
         self._c.compute_void_fraction(sv, ep, self._inv_vcell_i, self.eps_min)
         if self.mpi:
-            self.flow.exchange_field("eps")  # fill the ghosts the gather stencil reads
+            self._diag.exchange_field("eps")  # fill the ghosts the gather stencil reads
             self._fill_domain(ep)
         else:
             self._fill(ep)
@@ -424,7 +428,7 @@ class CfdDem:
 
     def compute_forces(self, pos, vel):
         for name in ("u", "v", "w"):
-            self.flow.exchange_field(name)
+            self._diag.exchange_field(name)
         uf, vf, wf = (self._fv(n) for n in ("u", "v", "w"))
         fx, fy, fz = (self._fv(n) for n in ("force_x", "force_y", "force_z"))
         sd = self._fv("sdf")  # wall mask: gather from / scatter to fluid corners only (partition of unity)
@@ -462,7 +466,7 @@ class CfdDem:
         if self.implicit_drag:
             if self.mpi:
                 self._fold_domain(db)
-                self.flow.exchange_field_add("drag_beta")
+                self._diag.exchange_field_add("drag_beta")
             else:
                 self._fold(db)
         if has_p:
@@ -478,7 +482,7 @@ class CfdDem:
         for nm, f in (("force_x", fx), ("force_y", fy), ("force_z", fz)):
             if self.mpi:
                 self._fold_domain(f)
-                self.flow.exchange_field_add(nm)
+                self._diag.exchange_field_add(nm)
             else:
                 self._fold(f)
 
@@ -528,7 +532,7 @@ class CfdDem:
     def rebalance(self, gamma=1.0):
         """Dynamic co-rebalancing (multi-rank only). Build ONE weight field over the global grid --
         fluid work (1 per cell) + gamma * particle count -- and redistribute BOTH codes onto the same
-        weighted ORB from it: the flow state via rebalance_by_weights (bit-exact migration + rebuild),
+        weighted ORB from it: the flow state via diagnostics.rebalance_by_weights (bit-exact migration + rebuild),
         the particles via migrate_to_weights. Because both build the SAME deterministic partition from
         the same array, they stay co-located. Call at a step boundary. No-op single-rank."""
         if not self.mpi:
@@ -549,7 +553,7 @@ class CfdDem:
         comm.Allreduce(counts, total, op=MPI.SUM)
         w = (1.0 + gamma * total).flatten(order="F")
         self._weights = w  # dem is migrated onto this each moving step; flow redistributes now
-        self.flow.rebalance_by_weights(w)
+        self._diag.rebalance_by_weights(w)
         self.dem.migrate_to_weights(w)
         # flow's block moved -> refresh the deposit-origin shift + local extents.
         bo = self.flow.block_origin()
