@@ -56,7 +56,7 @@ def run_bed(f_drive, comm, eps_target=0.6, N=16, mu=1.0, rho=1.0, dt=0.5, steps=
 
     s = peclet.flow.Solver(lnx, lny, lnz)
     s.set_rho(rho); s.set_mu(mu); s.set_dt(dt)
-    s.set_body_force(0.0, 0.0, f_drive)
+    s.set_body_force((0.0, 0.0, f_drive))
     s.init_mpi(N, N, N)
     s.set_pressure_geometry(np.asfortranarray(np.full((lnx, lny, lnz), 10.0)))
 

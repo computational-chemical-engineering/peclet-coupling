@@ -117,7 +117,7 @@ def build(P, comm=None):
     else:
         s = peclet.flow.Solver(P.cells, extent=P.extent)
     s.set_rho(P.rho_g); s.set_mu(P.mu_g); s.set_dt(P.fluid_dt)
-    s.set_domain_bc('-z', 'inflow', 0.0, 0.0, P.U_in)   # -z face: inflow, gas velocity U up
+    s.set_domain_bc('-z', 'inflow', velocity=(0.0, 0.0, P.U_in))   # -z face: inflow, gas velocity U up
     s.set_domain_bc('+z', 'outflow')                     # +z face: outflow
     for face in ('-x', '+x', '-y', '+y'):
         s.set_domain_bc(face, 'wall')          # x/y faces: no-slip (fluid never reaches them)
