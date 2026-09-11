@@ -55,6 +55,75 @@ import numpy as np
 
 
 class ResolvedCfdDem:
+    """Resolved (geometry-resolving) CFD-DEM coupling of a `peclet.flow.Solver` scene and a
+    `peclet.dem.Simulation` (see the module docstring for the physics: cut-cell IBM, the
+    hydrodynamic-load exchange, the reaction-vs-traction force choice, and the torque
+    validation/caveat).
+
+    This docstring documents the constructor.
+
+    Parameters
+    ----------
+    flow : peclet.flow.Solver
+        The Eulerian fluid solver; each grain becomes an analytic sphere instance in its scene
+        (`set_scene` / `set_solid_from_scene`). Units are a pure identity with `dem`: a solver built
+        with `Solver(cells, extent=...)` couples in the caller's own physical coordinates, one built
+        without `extent` couples in cells.
+    dem : peclet.dem.Simulation
+        The Lagrangian particle simulation. `dem.num_particles` fixes the grain count `self.n` for
+        the life of this driver.
+    radius : float
+        The single sphere radius shared by every grain (one `kSphere` node is installed for all
+        instances), in the same length units as `flow`'s scene.
+    mu : float
+        Fluid dynamic viscosity, in the caller's unit system (passed straight through to `flow`,
+        with no conversion).
+    rho : float
+        Fluid density, in the same unit system as `mu`.
+    fluid_dt : float
+        The fluid time step, passed straight to `flow.set_dt`. DEM advances `dem_substeps`
+        sub-steps of `fluid_dt / dem_substeps` per fluid step, holding the fluid force (and torque)
+        constant over them.
+    dem_substeps : int, default 20
+        Number of DEM sub-steps per fluid step.
+    periodic : tuple of bool, default (True, True, True)
+        Per-axis periodicity `(bx, by, bz)`. The flow scene supports only an all-periodic or an
+        all-non-periodic box; a mixed triple raises `ValueError`.
+    gravity : tuple of float, default (0.0, 0.0, 0.0)
+        Physical acceleration used, together with `rho_p` and `buoyancy`, to add each grain's net
+        gravitational/buoyant force to the hydrodynamic force before handing it to DEM.
+    rho_p : float, optional
+        Particle density. If `None` (the default), no gravity/buoyancy force is added by this
+        driver -- only the hydrodynamic force/torque is passed to DEM.
+    move_particles : bool, default True
+        If `False`, the scene is installed once at construction and never rebuilt or moved, and DEM
+        is never stepped or given forces/torques; only the (static) hydrodynamic load is computed
+        each `step()`.
+    buoyancy : bool, default True
+        If `True` and `rho_p` is given, only the net buoyant force `(rho_p - rho) * V * gravity` is
+        added, on the assumption that the fluid's pressure field already carries the hydrostatic
+        part. If `False` and `rho_p` is given, the full body force `rho_p * V * gravity` is added
+        instead (for a setup with no hydrostatic pressure gradient in the fluid, e.g. the usual
+        periodic box with no gravity in the fluid equations).
+    apply_torque : bool, default False
+        If `True`, the reaction torque is also handed to DEM (`set_external_torques`). Off by
+        default because DEM assigns a default inverse inertia unrelated to a grain's physical size,
+        and handing it a torque before its physical principal inertia is set can spin it up without
+        bound. `last_torque` is computed and stored either way.
+    force_method : {"reaction", "traction"}, default "reaction"
+        `"reaction"` uses the discrete momentum-reaction force (`flow.hydro_force_torque_reaction()`),
+        exactly conservative. `"traction"` uses the reconstructed surface-traction integral
+        (`flow.hydro_force_torque()`), kept as a diagnostic; it under-reads the drag by a measured,
+        resolution-independent ~29%.
+
+    Raises
+    ------
+    ValueError
+        If `periodic` is a mixed triple, or `force_method` is not `"reaction"` or `"traction"`.
+    TypeError
+        If `periodic` is not a 3-sequence of bool.
+    """
+
     def __init__(self, flow, dem, *, radius, mu, rho, fluid_dt, dem_substeps=20,
                  periodic=(True, True, True), gravity=(0.0, 0.0, 0.0), rho_p=None,
                  move_particles=True, buoyancy=True, apply_torque=False,
@@ -97,7 +166,20 @@ class ResolvedCfdDem:
         self.force_method = force_method
         self.n = int(dem.num_particles)
         self.last_force = np.zeros((self.n, 3))
+        """The hydrodynamic force on each grain from the most recent `step()`: a NumPy array of
+        shape `(n, 3)`, in the caller's physical force units (a pure identity with `flow`'s own
+        units). `force_method="reaction"` (default): the exactly momentum-conservative discrete
+        reaction. `force_method="traction"`: the reconstructed surface-traction integral, which
+        under-reads the drag by a measured ~29%. Excludes gravity/buoyancy -- those are added to a
+        local copy before being handed to DEM, not reflected back here. Zero before the first
+        `step()`; reflects only the most recent step."""
         self.last_torque = np.zeros((self.n, 3))
+        """The hydrodynamic reaction torque on each grain from the most recent `step()`: a NumPy
+        array of shape `(n, 3)`, world-frame, in the caller's physical torque units. Always computed
+        and stored regardless of `apply_torque`; only actually handed to DEM
+        (`set_external_torques`) when `apply_torque=True`, and only physically meaningful once each
+        grain's true principal inertia has been set in DEM (see `apply_torque`). Zero before the
+        first `step()`; reflects only the most recent step."""
         flow.set_dt(self.fluid_dt)
         dem.set_dt(self.dt_dem)   # the sub-steps below run on this stored dt (dem 1.0.0: no stepper takes dt)
         self._install_scene()
@@ -144,6 +226,26 @@ class ResolvedCfdDem:
 
     # --- L4-R3: the motion loop ----------------------------------------------------------------
     def step(self):
+        """Advance the coupled system by one fluid time step `fluid_dt`.
+
+        If `move_particles`, first pushes DEM's current positions/quaternions/velocities/angular
+        velocities into the flow scene and rebuilds the cut-cell geometry (`flow.rebuild_geometry()`
+        -- the velocity and pressure fields survive it). Then advances the fluid one step and reads
+        back the per-grain hydrodynamic load according to `force_method`, lagged by this one fluid
+        step (weak, explicit coupling): `last_force` and `last_torque` are always set;
+        `last_force_pressure` / `last_force_viscous` are set only when `force_method="traction"`
+        (`None` otherwise).
+
+        If `move_particles` is `False`, returns after computing the load -- DEM is never stepped and
+        receives no forces. Otherwise, the particles' net gravity/buoyancy is added to a copy of the
+        hydrodynamic force (see `buoyancy` / `rho_p`), the result is written to DEM's external force
+        buffer, the reaction torque is written to DEM's external torque buffer if `apply_torque`,
+        and DEM advances `dem_substeps` sub-steps at the sub-step `dt` set in `__init__`, holding
+        the applied force/torque constant over them.
+
+        Takes no arguments and returns nothing; results are read back from `last_force`,
+        `last_torque`, and, in traction mode, `last_force_pressure` / `last_force_viscous`.
+        """
         if self.move_particles:
             self._push_motion()
             self.flow.rebuild_geometry()
