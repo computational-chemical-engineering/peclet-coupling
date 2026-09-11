@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "peclet-coupling: two-way CFD-DEM coupling of peclet.flow and peclet.dem"
+abstract: >-
+  Two-way coupling of an Eulerian incompressible flow solver (peclet.flow) to a Lagrangian discrete
+  element solver (peclet.dem), in the caller's own physical units. Two drivers share one vocabulary:
+  CfdDem is the unresolved point-particle driver for dilute-to-dense suspensions and packed beds,
+  where a grain is a point carrying a drag closure and the fluid equations are volume-averaged
+  (porosity enters the momentum and continuity equations, not merely the drag); ResolvedCfdDem is
+  the resolved driver, in which each grain is an analytic signed-distance instance in the flow
+  solver's scene, the fluid resolves its surface, and no drag correlation appears anywhere. Both
+  codes share one MPI block decomposition, so the coupled run is distributed whenever they are.
+  Part of the peclet suite.
+type: software
+authors:
+  - family-names: Peters
+    given-names: Frank
+    email: e.a.j.f.peters@gmail.com
+    affiliation: "Eindhoven University of Technology"
+version: 0.4.0
+date-released: 2026-09-06
+license: MIT
+repository-code: "https://github.com/computational-chemical-engineering/peclet-coupling"
