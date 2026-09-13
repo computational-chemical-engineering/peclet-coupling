@@ -1,4 +1,24 @@
 cmake_minimum_required(VERSION 3.24)
+
+# -- Supported platform -------------------------------------------------------------------------
+# peclet is a Linux x86-64 project, and peclet-coupling publishes a source distribution only -- so every
+# install of it is a build. On Windows or macOS that build dies inside project() with "No
+# CMAKE_CXX_COMPILER could be found", a message about a missing compiler when the real answer is
+# "not this operating system". Say the real answer, before project() gets the chance to say the
+# wrong one.
+# (A Windows user met the CMake message on 2026-09-13; suite/docs/RELEASE_PREP.md section 11.)
+cmake_host_system_information(RESULT PECLET_HOST_OS QUERY OS_NAME)
+if(NOT PECLET_HOST_OS STREQUAL "Linux" AND NOT PECLET_ALLOW_UNSUPPORTED_PLATFORM)
+  message(FATAL_ERROR
+    "peclet-coupling is built and tested on Linux x86-64 only, and this host is ${PECLET_HOST_OS}.\n"
+    "  Windows: install inside WSL2 -- `wsl --install`, then pip install in the Linux shell.\n"
+    "  macOS:   use a Linux container (see suite docs/DEPLOYMENT.md).\n"
+    "  Neither: run the quick start in a browser, no install at all --\n"
+    "    https://colab.research.google.com/github/computational-chemical-engineering/peclet/blob/main/docs/notebooks/quickstart_sphere.ipynb\n"
+    "  To attempt a build here regardless (untested, unsupported), configure with\n"
+    "  -DPECLET_ALLOW_UNSUPPORTED_PLATFORM=ON.")
+endif()
+
 project(peclet_coupling LANGUAGES CXX)
 
 # peclet.coupling -- CFD-DEM exchange kernels (particle<->grid deposition, drag, momentum feedback)
