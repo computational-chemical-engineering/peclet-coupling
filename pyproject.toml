@@ -25,13 +25,22 @@ license-files = ["LICENSE"]
 authors = [{ name = "E.A.J.F. Peters", email = "e.a.j.f.peters@tue.nl" }]
 # The wheels are manylinux x86-64 and there is no Windows or macOS build (suite docs/DEPLOYMENT.md,
 # "Operating system"); say so on the PyPI page, where a reader looks before pip tells them.
+keywords = ["CFD-DEM", "fluidized bed", "gas-solid flow", "multiphase flow", "particle-laden", "coupling"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Science/Research",
+  "Intended Audience :: Education",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: C++",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Physics",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
 # clean-break API (QUALITY_PLAN D1): the drivers use flow.spacing/cells/global_cells and dem's
@@ -40,8 +49,11 @@ dependencies = ["numpy>=1.20", "peclet-flow>=1.0.0", "peclet-dem>=1.0.0"]
 
 [project.urls]
 Homepage = "https://github.com/computational-chemical-engineering/peclet"
-Documentation = "https://github.com/computational-chemical-engineering/peclet"
+Documentation = "https://computational-chemical-engineering.github.io/peclet/"
 Source = "https://github.com/computational-chemical-engineering/peclet-coupling"
+"Examples gallery" = "https://computational-chemical-engineering.github.io/peclet-examples/"
+Issues = "https://github.com/computational-chemical-engineering/peclet-coupling/issues"
+Changelog = "https://github.com/computational-chemical-engineering/peclet-coupling/blob/main/CHANGELOG.md"
 
 [tool.scikit-build]
 minimum-version = "0.8"
