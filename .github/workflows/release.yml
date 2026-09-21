@@ -12,6 +12,33 @@ on:
   workflow_dispatch:
 
 jobs:
+  # A PyPI long description is baked into the upload; pypi.org has no "edit README". A stale page
+  # noticed after a tag can only be fixed by publishing another version, so this runs BEFORE
+  # anything is built and `publish` needs it — the last moment the mistake is still cheap.
+  #
+  # The checker and its rules live in the UMBRELLA (docs/NAMING.md §2 is the canon), and are used
+  # from there rather than vendored, so nine repos cannot drift apart on what a retired spelling is.
+  landing-pages:
+    name: landing page is not stale
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: computational-chemical-engineering/peclet
+          path: .peclet-umbrella
+          sparse-checkout: |
+            /docs/NAMING.md
+            /tools/release/check_landing_pages.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: |
+          python .peclet-umbrella/tools/release/check_landing_pages.py \
+                 --naming .peclet-umbrella/docs/NAMING.md \
+                 --page README.md --dists peclet-coupling
+
   sdist:
     runs-on: ubuntu-latest
     steps:
@@ -27,7 +54,7 @@ jobs:
           path: dist/*.tar.gz
 
   publish:
-    needs: [sdist]
+    needs: [landing-pages, sdist]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     environment: pypi
