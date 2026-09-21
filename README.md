@@ -1,5 +1,10 @@
 # peclet.coupling — CFD-DEM coupling, unresolved and resolved
 
+```bash
+pip install peclet[cfd-dem]        # the `peclet-coupling` distribution; an sdist, built against
+                                   # your MPI and Kokkos prefix (see docs/DEPLOYMENT.md)
+```
+
 Two-way coupling of `peclet.flow` (Eulerian fluid) and `peclet.dem` (Lagrangian particles). Two
 drivers, one vocabulary:
 
