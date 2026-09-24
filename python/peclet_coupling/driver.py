@@ -297,6 +297,14 @@ class CfdDem:
         # partition from the same weights AND this alignment, or the two own different blocks. 1
         # until the first rebalance (the plain weighted ORB of uniform weights).
         self._align = 1
+        # The co-location assertion runs after every rebalance and once after the first moving
+        # step's migration. The latter checks the partition flow's init_mpi built against the one
+        # dem migrates onto, the plain ORB of uniform weights: they coincide on the grids the tests
+        # use, but flow's default init_mpi ORB snaps its splits to powers of two and dem's does not
+        # (48^3 at np = 4: flow 32|16, dem 24|24), and on such a grid a particle outside flow's
+        # block was coupled into cells this rank does not own -- silently. rebalance() before the
+        # first step co-locates them.
+        self._colocation_checked = False
 
         # deposit / void-fraction buffers. Under MPI they are REGISTERED flow fields (so the halo can
         # fold ghost deposits + fill ghosts); single-rank they are standalone padded scratch.
@@ -666,6 +674,8 @@ class CfdDem:
         if self.mpi and self.move_particles:
             self.dem.migrate_to_weights(self._weights, align=self._align)
         pos, vel = self._particles()
+        if self.mpi and self.move_particles and not self._colocation_checked:
+            self._assert_colocated(pos, "the first step")
         self._resize_particles(pos.shape[0])
         self.update_void_fraction(pos)
         if self.porous and not getattr(self, "_porous_primed", False):
@@ -777,6 +787,12 @@ class CfdDem:
                 "outside their rank's flow block, {} rank(s) with a flow block not aligned to {} "
                 "cells (this rank: block origin {}, cells {}, {} particle(s) outside). The two "
                 "partitions must be built from the same weights and alignment "
-                "(rebalance_by_weights' return value); refusing to couple across a mismatch."
+                "(rebalance_by_weights' return value); refusing to couple across a mismatch.{}"
                 .format(where, int(tot[0]), int(tot[1]), self._align, tuple(lo), tuple(n),
-                        int(mine[0])))
+                        int(mine[0]),
+                        "" if self._colocation_checked else
+                        " Before any rebalance this means flow's init_mpi partition (splits snapped"
+                        " to powers of two) is not the equal-cell ORB dem migrates onto on this"
+                        " grid: call rebalance() before the first step, which moves both codes"
+                        " onto the same aligned weighted ORB."))
+        self._colocation_checked = True
