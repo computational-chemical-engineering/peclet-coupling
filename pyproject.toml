@@ -53,7 +53,7 @@ Documentation = "https://computational-chemical-engineering.github.io/peclet/"
 Source = "https://github.com/computational-chemical-engineering/peclet-coupling"
 "Examples gallery" = "https://computational-chemical-engineering.github.io/peclet-examples/"
 Issues = "https://github.com/computational-chemical-engineering/peclet-coupling/issues"
-Changelog = "https://github.com/computational-chemical-engineering/peclet-coupling/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/computational-chemical-engineering/peclet/blob/main/CHANGELOG.md"
 
 [tool.scikit-build]
 minimum-version = "0.8"
