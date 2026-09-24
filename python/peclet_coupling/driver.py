@@ -292,6 +292,11 @@ class CfdDem:
         # this each moving step so its ownership tracks flow's grid partition (the deposit stays
         # in-block). None single-rank.
         self._weights = np.ones(gnx * gny * gnz, dtype=np.float64) if self.mpi else None
+        # ... and its ALIGNMENT: every block boundary on a multiple of this many cells. flow picks it
+        # in rebalance_by_weights (for its pressure multigrid) and returns it; dem must build its
+        # partition from the same weights AND this alignment, or the two own different blocks. 1
+        # until the first rebalance (the plain weighted ORB of uniform weights).
+        self._align = 1
 
         # deposit / void-fraction buffers. Under MPI they are REGISTERED flow fields (so the halo can
         # fold ghost deposits + fill ghosts); single-rank they are standalone padded scratch.
@@ -659,7 +664,7 @@ class CfdDem:
         # so every owned particle sits in this rank's block (the substeps only drift it by < a ghost
         # band, corrected at the next step's migrate). Static bed / single-rank: no migration.
         if self.mpi and self.move_particles:
-            self.dem.migrate_to_weights(self._weights)
+            self.dem.migrate_to_weights(self._weights, align=self._align)
         pos, vel = self._particles()
         self._resize_particles(pos.shape[0])
         self.update_void_fraction(pos)
@@ -683,9 +688,13 @@ class CfdDem:
     def rebalance(self, gamma=1.0):
         """Dynamic co-rebalancing (multi-rank only). Build ONE weight field over the global grid --
         fluid work (1 per cell) + gamma * particle count -- and redistribute BOTH codes onto the same
-        weighted ORB from it: the flow state via diagnostics.rebalance_by_weights (bit-exact migration + rebuild),
-        the particles via migrate_to_weights. Because both build the SAME deterministic partition from
-        the same array, they stay co-located. Call at a step boundary. No-op single-rank."""
+        weighted ORB from it: the flow state via diagnostics.rebalance_by_weights (bit-exact
+        migration + rebuild), which also chooses the ORB's alignment for its pressure multigrid and
+        returns it, then the particles via migrate_to_weights(w, align=<that alignment>). Both build
+        the SAME deterministic partition from the same array and alignment, so they stay
+        co-located; the moving step's per-step migration reuses both. Co-location is then asserted
+        on every rank (every particle dem owns lies in flow's block) and a violation raises
+        RuntimeError on every rank. Call at a step boundary. No-op single-rank."""
         if not self.mpi:
             return
         from mpi4py import MPI
@@ -709,10 +718,65 @@ class CfdDem:
         comm.Allreduce(counts, total, op=MPI.SUM)
         w = (1.0 + gamma * total).flatten(order="F")
         self._weights = w  # dem is migrated onto this each moving step; flow redistributes now
-        self._diag.rebalance_by_weights(w)
-        self.dem.migrate_to_weights(w)
+        align = self._diag.rebalance_by_weights(w)
+        if not isinstance(align, int) or align < 1:
+            raise RuntimeError(
+                "CfdDem.rebalance: flow's rebalance_by_weights returned {!r}, not the alignment of "
+                "the partition it built -- this peclet.flow predates the aligned weighted ORB, and "
+                "dem cannot rebuild flow's partition without it".format(align))
+        self._align = align
+        self.dem.migrate_to_weights(w, align=align)
         # flow's block moved -> refresh the deposit-origin shift + local extents.
         bo = self.flow.block_origin()
         self._setBlockOrigin(bo)
         self.nx, self.ny, self.nz = self.flow.cells
         self.ex, self.ey, self.ez = (self.nx + 2 * self.g, self.ny + 2 * self.g, self.nz + 2 * self.g)
+        pos, _ = self._particles()
+        self._assert_colocated(pos, "rebalance()")
+
+    def _assert_colocated(self, pos, where):
+        """Fail loudly, on every rank, unless flow and dem own the same blocks.
+
+        The deposit, the drag gather and the reaction scatter all assume that every particle dem
+        owns lies in flow's block on the same rank; if the two partitions differ, a particle's
+        volume and force land in cells another rank owns, silently. dem does not expose its block,
+        so the check is on what the deposit relies on: right after a migration, dem owns exactly
+        the particles whose cell lies in ITS block, so every owned particle's cell must lie in
+        FLOW's block ``[block_origin, block_origin + cells)`` (wrapped on periodic axes, clamped
+        on the others, as dem's migration bins). A tolerance of 1e-3 cells absorbs the float32
+        index map at a block face; a partition mismatch moves a face by at least one cell. It also
+        checks that flow's block is aligned to the alignment dem was handed. Collective: an
+        Allreduce of the failure counts, so every rank raises together or none does."""
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        p = pos.get() if self.device else np.asarray(pos)
+        c = np.asarray(p, dtype=np.float64)[:, 0:3]   # index coordinates, as rebalance bins them
+        G = (self.gnx, self.gny, self.gnz)
+        lo = self._blo
+        n = (self.nx, self.ny, self.nz)
+        tol = 1e-3
+        outside = np.zeros(c.shape[0], dtype=bool)
+        for a in range(3):
+            x = c[:, a]
+            if self.periodic[a]:
+                x = np.mod(x, G[a])
+                ok = np.zeros_like(outside)
+                for shift in (-G[a], 0, G[a]):   # a particle at a wrap face may bin either side
+                    ok |= (x + shift >= lo[a] - tol) & (x + shift <= lo[a] + n[a] + tol)
+            else:
+                x = np.clip(x, 0.0, float(G[a]))
+                ok = (x >= lo[a] - tol) & (x <= lo[a] + n[a] + tol)
+            outside |= ~ok
+        misaligned = any(lo[a] % self._align or n[a] % self._align for a in range(3))
+        mine = np.array([int(outside.sum()), int(misaligned)], dtype=np.int64)
+        tot = np.empty_like(mine)
+        comm.Allreduce(mine, tot, op=MPI.SUM)
+        if tot.any():
+            raise RuntimeError(
+                "CfdDem ({}): flow and dem do not own the same blocks -- {} dem particle(s) lie "
+                "outside their rank's flow block, {} rank(s) with a flow block not aligned to {} "
+                "cells (this rank: block origin {}, cells {}, {} particle(s) outside). The two "
+                "partitions must be built from the same weights and alignment "
+                "(rebalance_by_weights' return value); refusing to couple across a mismatch."
+                .format(where, int(tot[0]), int(tot[1]), self._align, tuple(lo), tuple(n),
+                        int(mine[0])))
