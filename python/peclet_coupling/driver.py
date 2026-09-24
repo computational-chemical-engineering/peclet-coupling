@@ -61,6 +61,10 @@ class CfdDem:
     radius : float or array_like
         Particle radius: a scalar (every particle shares it) or a per-particle array of shape
         `(N,)`, `N = dem.num_particles`, in the same physical length units as `flow.spacing`.
+        Multi-rank, a per-particle radius must be dem's own (proportional to `dem.get_scales()`,
+        the per-particle size dem carries through a migration): after every migration the driver
+        takes the radii of the particles this rank now owns from dem, and a co-rebalance with
+        radii that are not dem's raises `ValueError`.
     drag : str, default "schiller_naumann"
         The drag law: one of `"stokes"`, `"schiller_naumann"`, `"ergun"`, `"di_felice"`,
         `"wen_yu"`, `"gidaspow"`, `"beetstra"`, `"tang"`.
@@ -322,6 +326,26 @@ class CfdDem:
             flow.enable_drag()  # drag_beta on the momentum diagonal + force_* (beta*u_p) in the RHS
         else:
             flow.enable_cell_force()  # explicit reaction force in force_x/y/z
+        self.dem.set_dt(self.dt_dem)
+        N = dem.num_particles  # this rank's OWNED count under MPI
+        self._N = N
+        # Radii, like every other length here, are handed to the kernels in CELLS.
+        kl = self._k_len
+        self._radius0 = float(radius) * kl if np.isscalar(radius) else None
+        self._rad = (xp.full(N, float(radius) * kl, dtype=xp.float32) if np.isscalar(radius)
+                     else xp.asarray(np.ascontiguousarray(np.asarray(radius) * kl,
+                                                          dtype=np.float32)))
+        # A per-particle radius must follow its particle through every migration. dem carries
+        # each particle's size as its scale (world radius = scale x global_scale x base radius,
+        # migrated with the particle), so multi-rank the driver keeps only the one constant
+        # radius/scale, in cells, and re-derives the owned radii from dem after each migration
+        # (_follow_radii) -- never a parallel array that a migration would leave behind.
+        self._rad_per_scale = (self._radius_per_scale(radius)
+                               if self.mpi and self._radius0 is None else None)
+        self._fdrag = xp.zeros((N, 3), dtype=xp.float32)
+        self._ufluid = xp.zeros((N, 3), dtype=xp.float32)
+        self._last_slip = None
+        self.last_eps = None
         # ONE PARTITION FROM CONSTRUCTION ON (user decision, 2026-09-25): a moving multi-rank run
         # moves both codes onto the weighted ORB of the combined CFD + DEM cost now, through the
         # same path as rebalance(). Before this, flow owned its init_mpi partition (splits snapped
@@ -332,19 +356,6 @@ class CfdDem:
         # rebalance() remains available when its dem is distributed.
         if self.mpi and self.move_particles:
             self._corebalance(_GAMMA, "construction")
-        self.dem.set_dt(self.dt_dem)
-        N = dem.num_particles  # this rank's OWNED count under MPI
-        self._N = N
-        # Radii, like every other length here, are handed to the kernels in CELLS.
-        kl = self._k_len
-        self._radius0 = float(radius) * kl if np.isscalar(radius) else None
-        self._rad = (xp.full(N, float(radius) * kl, dtype=xp.float32) if np.isscalar(radius)
-                     else xp.asarray(np.ascontiguousarray(np.asarray(radius) * kl,
-                                                          dtype=np.float32)))
-        self._fdrag = xp.zeros((N, 3), dtype=xp.float32)
-        self._ufluid = xp.zeros((N, 3), dtype=xp.float32)
-        self._last_slip = None
-        self.last_eps = None
 
     def _adopt_flow_block(self):
         """Take this rank's block -- origin, local extents and the smoothing's open faces -- from
@@ -388,8 +399,39 @@ class CfdDem:
         return (float(self._blo[0]), float(self._blo[1]), float(self._blo[2]), 1.0,
                 self.ex, self.ey, self.ez, self.g)
 
+    def _radius_per_scale(self, radius):
+        """The one constant `radius / dem scale` (in cells) of a per-particle radius array, or None
+        when the array is not proportional to dem's scales (then the radii cannot follow a
+        migration). Collective: min and max of the ratio over every rank's particles."""
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        r = np.asarray(radius, dtype=np.float64).ravel()
+        sc = np.asarray(self.dem.get_scales(), dtype=np.float64).ravel()
+        if r.shape != sc.shape:
+            raise ValueError(
+                "CfdDem: radius has {} entries, this rank's dem owns {} particles".format(
+                    r.size, sc.size))
+        if comm.allreduce(int(np.any(sc <= 0.0)), op=MPI.MAX):
+            return None
+        q = r / sc
+        lo = comm.allreduce(float(q.min()) if q.size else np.inf, op=MPI.MIN)
+        hi = comm.allreduce(float(q.max()) if q.size else -np.inf, op=MPI.MAX)
+        if lo > hi:                # no particles on any rank: nothing to follow
+            return self._k_len
+        if hi - lo > 1e-6 * hi:
+            return None
+        return 0.5 * (lo + hi) * self._k_len
+
+    def _follow_radii(self):
+        """After a migration: the radii of the particles this rank now owns, from dem's scales
+        (a per-particle radius only; a scalar one is re-broadcast by _resize_particles)."""
+        if self._radius0 is not None:
+            return
+        sc = np.asarray(self.dem.get_scales(), dtype=np.float64)
+        self._rad = self.xp.asarray((sc * self._rad_per_scale).astype(np.float32))
+
     # Size the per-particle scratch to the current owned count (constant single-rank / fixed bed;
-    # changes across a rebalance — needs a scalar radius to re-broadcast).
+    # changes across a migration, where a per-particle radius is re-derived by _follow_radii).
     def _resize_particles(self, n):
         if self._fdrag.shape[0] == n:
             return
@@ -691,6 +733,7 @@ class CfdDem:
         # band, corrected at the next step's migrate). Static bed / single-rank: no migration.
         if self.mpi and self.move_particles:
             self.dem.migrate_to_weights(self._weights, align=self._align)
+            self._follow_radii()
         pos, vel = self._particles()
         if self.mpi and self.move_particles and not self._first_step_checked:
             self._assert_colocated(pos, "the first step")
@@ -735,6 +778,12 @@ class CfdDem:
     def _corebalance(self, gamma, where):
         """rebalance()'s body: the combined weight field, then flow and dem onto its aligned
         weighted ORB, then the co-location assertion (reported as raised at `where`)."""
+        if self._radius0 is None and self._rad_per_scale is None:
+            raise ValueError(
+                "CfdDem ({}): the per-particle radius is not proportional to dem's scales, so it "
+                "cannot follow its particle through the migration a co-rebalance does. Give dem "
+                "the sizes (set_scales) and pass radius = scale x global_scale x base radius."
+                .format(where))
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         gnx, gny, gnz = self.gnx, self.gny, self.gnz  # GLOBAL grid
@@ -764,6 +813,8 @@ class CfdDem:
                 "dem cannot rebuild flow's partition without it".format(where, align))
         self._align = align
         self.dem.migrate_to_weights(w, align=align)
+        self._follow_radii()
+        self._resize_particles(self.dem.num_particles)
         # flow's block moved -> refresh the deposit-origin shift, local extents and the smoothing's
         # open faces (which of this block's faces are interior rank boundaries can change).
         self._adopt_flow_block()

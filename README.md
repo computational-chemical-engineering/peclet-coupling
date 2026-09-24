@@ -191,6 +191,16 @@ migrate + step + deposit-fold + gather reproduce single-rank to ~4e-8, np 1/2/4)
 `test_mpi_rebalance.py` (above). Call flow's
 `init_mpi` BEFORE its geometry (`set_solid` / `set_pressure_geometry`); flow raises otherwise.
 
+**Polydisperse, multi-rank:** a per-particle `radius` must follow its particle through every
+migration (construction, `rebalance()`, the per-step `migrate_to_weights`). dem carries each
+particle's size as its scale (world radius = scale × global_scale × base radius), so the driver keeps
+only the constant radius/scale and re-derives the owned radii from `dem.get_scales()` after each
+migration. The `radius` array must therefore be dem's own radii (`set_scales` after `set_positions`);
+one that is not proportional to the scales raises `ValueError` at the first co-rebalance. Until
+2026-09-25 the driver kept the construction-time array, so every migration handed particles another
+particle's radius (or an array of the wrong length): `test_mpi_polydisperse_moving.py` (48³, radii
+0.5/0.8) missed np = 1 by 5.5 (np 2) and 7.7 (np 4) relative; it now reproduces it to 5e-8.
+
 np=4 of the moving test used to fail twice over (fixed 2026-09-24). Up to dem `8abcfd2` it
 deadlocked: the cloud's y = 16 row sits on the 2x2 block face, so the upper ranks owe ghosts to the
 lower ones and receive none, and dem skipped every exchange on a rank without ghosts (fixed in dem
