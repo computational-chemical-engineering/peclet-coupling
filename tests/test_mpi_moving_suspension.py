@@ -98,10 +98,14 @@ def test_mpi_moving_suspension():
             json.dump({"mean_vx": mean_vx}, open(ref_file, "w"))
         tag = "reference"
     else:
-        ref = json.load(open(ref_file))["mean_vx"] if os.path.exists(ref_file) else mean_vx
-        err = abs(mean_vx - ref) / abs(ref)
-        ok = ok and err < 1e-4  # reproduce single-rank across the migration window
-        tag = f"vs np=1 {ref:.8e} rel-err={err:.2e}"
+        if os.path.exists(ref_file):
+            ref = json.load(open(ref_file))["mean_vx"]
+            err = abs(mean_vx - ref) / abs(ref)
+            ok = ok and err < 1e-4  # reproduce single-rank across the migration window
+            tag = f"vs np=1 {ref:.8e} rel-err={err:.2e}"
+        else:  # it used to compare against ITSELF here and pass with rel-err 0 (as test_mpi_smoothing)
+            ok = False
+            tag = "NO REFERENCE (run np=1 first)"
     if rank == 0:
         print(f"[np={size}] mean_vx={mean_vx:.8e}  migrated={bool(crossed)}  {tag}")
         print(f"MPI MOVING SUSPENSION (np={size}): {'PASS' if ok else 'FAIL'}")
