@@ -43,8 +43,8 @@ def run(comm, N=32, r=0.7, steps=6, v0=-6.0):
 
     s = peclet.flow.Solver(lnx, lny, lnz)
     s.set_rho(1.0); s.set_mu(1.0); s.set_dt(0.1)
+    s.init_mpi(N, N, N)  # BEFORE the geometry: flow raises otherwise (the pressure MG is built there)
     s.set_pressure_geometry(np.asfortranarray(np.full((lnx, lny, lnz), 10.0)))
-    s.init_mpi(N, N, N)
 
     # cloud spanning x (crosses the x rank boundary), y,z in the interior; drift along -x.
     xv = (np.arange(6) + 0.5) * N / 6

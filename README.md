@@ -161,18 +161,22 @@ the DISTRIBUTED DEM substeps (`dem.step_mpi`, requires `dem.init_mpi` + `dem.ena
 that momentarily owns no particles still runs the halo collectives (the per-particle kernels are
 skipped). Validated `test_mpi_fixed_bed_ergun.py` (static, bit-identical np 1/2/4) and
 `test_mpi_moving_suspension.py` (drifting cloud crossing rank boundaries: the distributed
-migrate + step + deposit-fold + gather reproduce single-rank to ~2e-7, np 1/2).
+migrate + step + deposit-fold + gather reproduce single-rank to ~4e-8, np 1/2/4). Call flow's
+`init_mpi` BEFORE its geometry (`set_solid` / `set_pressure_geometry`); flow raises otherwise.
 
-Known limitations (not the coupling — every distributed coupling op is bit-identical to single-rank
-in isolation): (1) **np=4 of the moving test does not yet reproduce np=1** (rel-err 1.1e-2, against
-1.6e-7 at np=2). Up to dem `8abcfd2` it deadlocked instead; the cause was not an empty rank but a
-**one-sided particle halo**: the cloud's y = 16 row sits on the 2x2 block face, so the upper ranks
-owe ghosts to the lower ones and receive none, and dem skipped every exchange on a rank without
-ghosts (fixed in dem `6d30722`). The remaining np=4 mismatch is flow's: one distributed flow step
-at np=4 differs from np=1 with bit-identical deposits and drag (under investigation). (2) A
-*sustained* dilute settling suspension in a triply-periodic box with no buoyancy is an ill-posed,
-numerically unstable configuration — at np>1 the flow solve's reduction-floor non-determinism seeds
-that instability. Well-posed cases (bounded / driven flow, denser beds) are unaffected.
+np=4 of the moving test used to fail twice over (fixed 2026-09-24). Up to dem `8abcfd2` it
+deadlocked: the cloud's y = 16 row sits on the 2x2 block face, so the upper ranks owe ghosts to the
+lower ones and receive none, and dem skipped every exchange on a rank without ghosts (fixed in dem
+`6d30722`). It then missed np=1 by 1.1e-2 because the test called flow's `set_pressure_geometry`
+BEFORE `init_mpi`: the pressure multigrid is built with the geometry, so every rank solved its own
+block-periodic pressure problem (np=2 hid it: the cloud is symmetric within each x-half). flow now
+raises on that order, the test calls `init_mpi` first, and np=4 reproduces np=1 to 2e-8.
+
+Known limitation (not the coupling — every distributed coupling op is bit-identical to single-rank
+in isolation): a *sustained* dilute settling suspension in a triply-periodic box with no buoyancy
+is an ill-posed, numerically unstable configuration — at np>1 the flow solve's reduction-floor
+non-determinism seeds that instability. Well-posed cases (bounded / driven flow, denser beds) are
+unaffected.
 
 Note: `dem.get_velocities()` (host copy getter) has a pre-existing failure after a *periodic* DEM
 step on CUDA (a Kokkos strided-subview-after-resize limitation, unrelated to the coupling); the
