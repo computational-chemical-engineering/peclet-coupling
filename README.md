@@ -163,10 +163,14 @@ skipped). Validated `test_mpi_fixed_bed_ergun.py` (static, bit-identical np 1/2/
 `test_mpi_moving_suspension.py` (drifting cloud crossing rank boundaries: the distributed
 migrate + step + deposit-fold + gather reproduce single-rank to ~2e-7, np 1/2).
 
-Two known limitations of the underlying dem distributed step (not the coupling — every distributed
-coupling op is bit-identical to single-rank in isolation): (1) a rank with **zero owned particles but
-an incoming ghost** deadlocks the dem step (affects very dilute clouds / np=4 of the moving test);
-(2) a *sustained* dilute settling suspension in a triply-periodic box with no buoyancy is an ill-posed,
+Known limitations (not the coupling — every distributed coupling op is bit-identical to single-rank
+in isolation): (1) **np=4 of the moving test does not yet reproduce np=1** (rel-err 1.1e-2, against
+1.6e-7 at np=2). Up to dem `8abcfd2` it deadlocked instead; the cause was not an empty rank but a
+**one-sided particle halo**: the cloud's y = 16 row sits on the 2x2 block face, so the upper ranks
+owe ghosts to the lower ones and receive none, and dem skipped every exchange on a rank without
+ghosts (fixed in dem `6d30722`). The remaining np=4 mismatch is flow's: one distributed flow step
+at np=4 differs from np=1 with bit-identical deposits and drag (under investigation). (2) A
+*sustained* dilute settling suspension in a triply-periodic box with no buoyancy is an ill-posed,
 numerically unstable configuration — at np>1 the flow solve's reduction-floor non-determinism seeds
 that instability. Well-posed cases (bounded / driven flow, denser beds) are unaffected.
 
