@@ -151,9 +151,24 @@ each rank couples its **local block**, the deposit grid map is shifted by the bl
 particles in global coordinates land locally), and cross-rank + periodic ghost deposits (void
 fraction + drag reaction) fold onto their owner with the reverse halo (`diagnostics.exchange_field_add`) instead
 of the single-rank NumPy fold. `CfdDem.rebalance(gamma)` forms one weight field
-(`1 + gamma * particle_count`) and redistributes BOTH codes onto the same weighted ORB
-(`flow.diagnostics.rebalance_by_weights` + `dem.migrate_to_weights`). Give the flow + dem the same decomposition
-(matching grid dims / domain) before constructing `CfdDem`.
+(`1 + gamma * particle_count`) and redistributes BOTH codes onto the same weighted ORB. flow's
+`diagnostics.rebalance_by_weights(w)` builds it ALIGNED for its pressure multigrid — every split
+plane on a multiple of `2^a` cells, the largest `a` within a 1.05 weight imbalance — and returns
+`2^a`; `CfdDem` passes that to `dem.migrate_to_weights(w, align=2^a)` and keeps it for the moving
+step's per-step migration, so the two codes own identical blocks. Give the flow + dem the same
+decomposition (matching grid dims / domain) before constructing `CfdDem`.
+
+**Co-location is asserted, never assumed.** After every `rebalance()`, and once at the first moving
+step, every rank checks that each particle dem owns lies in flow's block (and that flow's block is
+aligned as dem was told); a mismatch raises `RuntimeError` on every rank. The first-step check
+catches a pre-existing trap: until the first rebalance flow owns its `init_mpi` partition (splits
+snapped to powers of two) while dem migrates onto the equal-cell ORB, and the two differ on some
+grids — 48³ at np = 4 gives flow 32|16 and dem 24|24, where the deposit used to couple ~7.5k
+particles into cells their rank does not own, silently. On such a grid call `rebalance()` before
+the first step. `test_mpi_rebalance.py` (np = 1 first, then 2 and 4): a 32³ heap, `rebalance(4)`
+→ alignment 2, the mean particle and fluid velocities reproduce np = 1 (0 and 1.6e-16 relative),
+and moving dem back onto the equal-cell ORB makes the assertion fire. It needs flow `413e75a`: a
+size-changing redistribute used to zero the porous eps^n, 5e-2 off after three steps.
 
 **Moving particles** (`move_particles=True`): each fluid step `CfdDem` first migrates dem onto flow's
 grid partition (`dem.migrate_to_weights`) so every owned particle sits in its rank's block, then runs
@@ -161,7 +176,8 @@ the DISTRIBUTED DEM substeps (`dem.step_mpi`, requires `dem.init_mpi` + `dem.ena
 that momentarily owns no particles still runs the halo collectives (the per-particle kernels are
 skipped). Validated `test_mpi_fixed_bed_ergun.py` (static, bit-identical np 1/2/4) and
 `test_mpi_moving_suspension.py` (drifting cloud crossing rank boundaries: the distributed
-migrate + step + deposit-fold + gather reproduce single-rank to ~4e-8, np 1/2/4). Call flow's
+migrate + step + deposit-fold + gather reproduce single-rank to ~4e-8, np 1/2/4) and
+`test_mpi_rebalance.py` (above). Call flow's
 `init_mpi` BEFORE its geometry (`set_solid` / `set_pressure_geometry`); flow raises otherwise.
 
 np=4 of the moving test used to fail twice over (fixed 2026-09-24). Up to dem `8abcfd2` it
