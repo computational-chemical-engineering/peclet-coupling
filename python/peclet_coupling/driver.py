@@ -248,10 +248,7 @@ class CfdDem:
                           "wen_yu": DRAG_WEN_YU, "gidaspow": DRAG_GIDASPOW,
                           "beetstra": DRAG_BEETSTRA, "tang": DRAG_TANG}[drag]
 
-        nx, ny, nz = flow.cells  # LOCAL block dims under MPI
         self.g = flow.ghost_width()
-        self.nx, self.ny, self.nz = nx, ny, nz
-        self.ex, self.ey, self.ez = nx + 2 * self.g, ny + 2 * self.g, nz + 2 * self.g
 
         # Multi-rank co-decomposition. When flow runs distributed each rank couples its LOCAL block:
         # the deposit origin is shifted by the block origin (so particles in GLOBAL coordinates land
@@ -267,26 +264,9 @@ class CfdDem:
         except Exception:
             self.mpi = False
         self._org = [float(v) for v in getattr(flow, "origin", (0.0, 0.0, 0.0))]
-        bo = flow.block_origin() if self.mpi else (0, 0, 0)
-        self._setBlockOrigin(bo)
-        gnx, gny, gnz = flow.global_cells if self.mpi else (nx, ny, nz)
+        gnx, gny, gnz = flow.global_cells if self.mpi else tuple(flow.cells)
         self.gnx, self.gny, self.gnz = gnx, gny, gnz
-        # Smoothing under MPI: a local block face that is an INTERIOR rank boundary is not a wall —
-        # the diffusion sweep must read the halo ghost there (bit set), while faces on the GLOBAL
-        # domain boundary keep the validated single-rank zero-flux closed-box behaviour (bit clear,
-        # also on periodic axes, matching the single-rank path byte-for-byte). The sweep loop in
-        # update_void_fraction halo-refreshes solidvol before every sweep, so multi-rank smoothing
-        # reproduces the single-rank arithmetic exactly.
-        self._smooth_open = 0
-        if self.mpi:
-            lo = (bo[0], bo[1], bo[2])
-            dims = (nx, ny, nz)
-            gdims = (gnx, gny, gnz)
-            for a in range(3):
-                if lo[a] > 0:
-                    self._smooth_open |= 1 << (2 * a)
-                if lo[a] + dims[a] < gdims[a]:
-                    self._smooth_open |= 1 << (2 * a + 1)
+        self._adopt_flow_block()
         # The CURRENT shared decomposition, as an x-fastest per-cell weight field. Uniform => the
         # default equal-cell ORB flow's init_mpi built; rebalance() overwrites it. dem is migrated onto
         # this each moving step so its ownership tracks flow's grid partition (the deposit stays
@@ -354,6 +334,33 @@ class CfdDem:
         self._ufluid = xp.zeros((N, 3), dtype=xp.float32)
         self._last_slip = None
         self.last_eps = None
+
+    def _adopt_flow_block(self):
+        """Take this rank's block -- origin, local extents and the smoothing's open faces -- from
+        flow's CURRENT partition. Run at construction and after every co-rebalance, so nothing
+        derived from the block can outlive the partition it was computed on."""
+        flow = self.flow
+        bo = flow.block_origin() if self.mpi else (0, 0, 0)
+        self._setBlockOrigin(bo)
+        nx, ny, nz = flow.cells  # LOCAL block dims under MPI
+        self.nx, self.ny, self.nz = nx, ny, nz
+        self.ex, self.ey, self.ez = nx + 2 * self.g, ny + 2 * self.g, nz + 2 * self.g
+        # Smoothing under MPI: a local block face that is an INTERIOR rank boundary is not a wall —
+        # the diffusion sweep must read the halo ghost there (bit set), while faces on the GLOBAL
+        # domain boundary keep the validated single-rank zero-flux closed-box behaviour (bit clear,
+        # also on periodic axes, matching the single-rank path byte-for-byte). The sweep loop in
+        # update_void_fraction halo-refreshes solidvol before every sweep, so multi-rank smoothing
+        # reproduces the single-rank arithmetic exactly.
+        self._smooth_open = 0
+        if self.mpi:
+            lo = (bo[0], bo[1], bo[2])
+            dims = (nx, ny, nz)
+            gdims = (self.gnx, self.gny, self.gnz)
+            for a in range(3):
+                if lo[a] > 0:
+                    self._smooth_open |= 1 << (2 * a)
+                if lo[a] + dims[a] < gdims[a]:
+                    self._smooth_open |= 1 << (2 * a + 1)
 
     def _setBlockOrigin(self, bo):
         """This block's physical lower corner, and the same offset in CELLS (which the domain-ghost
@@ -736,11 +743,9 @@ class CfdDem:
                 "dem cannot rebuild flow's partition without it".format(align))
         self._align = align
         self.dem.migrate_to_weights(w, align=align)
-        # flow's block moved -> refresh the deposit-origin shift + local extents.
-        bo = self.flow.block_origin()
-        self._setBlockOrigin(bo)
-        self.nx, self.ny, self.nz = self.flow.cells
-        self.ex, self.ey, self.ez = (self.nx + 2 * self.g, self.ny + 2 * self.g, self.nz + 2 * self.g)
+        # flow's block moved -> refresh the deposit-origin shift, local extents and the smoothing's
+        # open faces (which of this block's faces are interior rank boundaries can change).
+        self._adopt_flow_block()
         pos, _ = self._particles()
         self._assert_colocated(pos, "rebalance()")
 
