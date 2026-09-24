@@ -150,22 +150,33 @@ Both cases pass identically on **host-openmp and CUDA (RTX 5080)**:
 each rank couples its **local block**, the deposit grid map is shifted by the block origin (so
 particles in global coordinates land locally), and cross-rank + periodic ghost deposits (void
 fraction + drag reaction) fold onto their owner with the reverse halo (`diagnostics.exchange_field_add`) instead
-of the single-rank NumPy fold. `CfdDem.rebalance(gamma)` forms one weight field
-(`1 + gamma * particle_count`) and redistributes BOTH codes onto the same weighted ORB. flow's
+of the single-rank NumPy fold.
+
+**One partition from construction on.** A coupled run owns ONE decomposition, chosen by the combined
+cost of the two codes: the weight field `1 + gamma * particle_count` over the global grid (fluid work
+1 per cell, gamma per particle; gamma = 1 until its calibration). A moving multi-rank `CfdDem` builds
+it at construction and moves BOTH codes onto its weighted ORB before the first step;
+`CfdDem.rebalance(gamma)` does the same again later, through the same code path. flow's
 `diagnostics.rebalance_by_weights(w)` builds it ALIGNED for its pressure multigrid — every split
 plane on a multiple of `2^a` cells, the largest `a` within a 1.05 weight imbalance — and returns
 `2^a`; `CfdDem` passes that to `dem.migrate_to_weights(w, align=2^a)` and keeps it for the moving
 step's per-step migration, so the two codes own identical blocks. Give the flow + dem the same
-decomposition (matching grid dims / domain) before constructing `CfdDem`.
+global grid / domain (`flow.init_mpi` before its geometry, `dem.init_mpi` + `enable_mpi_step`)
+before constructing `CfdDem`; where each rank's particles start does not matter, the construction
+migrates them. The construction co-rebalance is what closes the start-up trap: `init_mpi` alone
+leaves flow on its default partition (splits snapped to powers of two) and dem on the equal-cell
+ORB, which differ on some grids — 48³ at np = 4 gives flow 32|16 and dem 24|24, where the deposit
+used to couple ~7.5k particles into cells their rank does not own, silently. A fixed bed
+(`move_particles=False`) is not co-rebalanced at construction: dem never migrates there, so its
+particles stay in flow's `init_mpi` block where the caller put them; `rebalance()` is still
+available when its dem is distributed.
 
-**Co-location is asserted, never assumed.** After every `rebalance()`, and once at the first moving
-step, every rank checks that each particle dem owns lies in flow's block (and that flow's block is
-aligned as dem was told); a mismatch raises `RuntimeError` on every rank. The first-step check
-catches a pre-existing trap: until the first rebalance flow owns its `init_mpi` partition (splits
-snapped to powers of two) while dem migrates onto the equal-cell ORB, and the two differ on some
-grids — 48³ at np = 4 gives flow 32|16 and dem 24|24, where the deposit used to couple ~7.5k
-particles into cells their rank does not own, silently. On such a grid call `rebalance()` before
-the first step. `test_mpi_rebalance.py` (np = 1 first, then 2 and 4): a 32³ heap, `rebalance(4)`
+**Co-location is asserted, never assumed.** After every co-rebalance (construction included), and
+once more at the first moving step as a safety net, every rank checks that each particle dem owns
+lies in flow's block (and that flow's block is aligned as dem was told); a mismatch raises
+`RuntimeError` on every rank. `test_mpi_construction_partition.py` (np = 1 first, then 2 and 4):
+the 48³ heap, no `rebalance()` call, co-location holds and the velocities reproduce np = 1.
+`test_mpi_rebalance.py` (np = 1 first, then 2 and 4): a 32³ heap, `rebalance(4)`
 → alignment 2, the mean particle and fluid velocities reproduce np = 1 (0 and 1.6e-16 relative),
 and moving dem back onto the equal-cell ORB makes the assertion fire. It needs flow `413e75a`: a
 size-changing redistribute used to zero the porous eps^n, 5e-2 off after three steps.
