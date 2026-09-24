@@ -19,6 +19,11 @@ deposits, fill for reads) is done here in NumPy on the padded (ex,ey,ez) buffers
 """
 import numpy as np
 
+# The particle weight of the combined CFD + DEM cost field, 1 + gamma x (particles in the cell): the
+# default of rebalance(gamma) and the value the construction-time co-rebalance uses. Calibrating it
+# against measured per-cell costs is deferred (user decision, 2026-09-25).
+_GAMMA = 1.0
+
 
 def _sl(axis, idx):
     s = [slice(None), slice(None), slice(None)]
@@ -267,24 +272,20 @@ class CfdDem:
         gnx, gny, gnz = flow.global_cells if self.mpi else tuple(flow.cells)
         self.gnx, self.gny, self.gnz = gnx, gny, gnz
         self._adopt_flow_block()
-        # The CURRENT shared decomposition, as an x-fastest per-cell weight field. Uniform => the
-        # default equal-cell ORB flow's init_mpi built; rebalance() overwrites it. dem is migrated onto
-        # this each moving step so its ownership tracks flow's grid partition (the deposit stays
-        # in-block). None single-rank.
+        # The CURRENT shared decomposition, as an x-fastest per-cell weight field. Uniform until the
+        # co-rebalance at the end of construction (moving runs) replaces it by the combined cost
+        # field; rebalance() overwrites it again. dem is migrated onto this each moving step so its
+        # ownership tracks flow's grid partition (the deposit stays in-block). None single-rank.
         self._weights = np.ones(gnx * gny * gnz, dtype=np.float64) if self.mpi else None
         # ... and its ALIGNMENT: every block boundary on a multiple of this many cells. flow picks it
         # in rebalance_by_weights (for its pressure multigrid) and returns it; dem must build its
         # partition from the same weights AND this alignment, or the two own different blocks. 1
         # until the first rebalance (the plain weighted ORB of uniform weights).
         self._align = 1
-        # The co-location assertion runs after every rebalance and once after the first moving
-        # step's migration. The latter checks the partition flow's init_mpi built against the one
-        # dem migrates onto, the plain ORB of uniform weights: they coincide on the grids the tests
-        # use, but flow's default init_mpi ORB snaps its splits to powers of two and dem's does not
-        # (48^3 at np = 4: flow 32|16, dem 24|24), and on such a grid a particle outside flow's
-        # block was coupled into cells this rank does not own -- silently. rebalance() before the
-        # first step co-locates them.
-        self._colocation_checked = False
+        # The co-location assertion runs after every co-rebalance (construction included) and once
+        # more after the first moving step's migration, a safety net: that step migrates dem onto
+        # self._weights/self._align, which must still be flow's partition.
+        self._first_step_checked = False
 
         # deposit / void-fraction buffers. Under MPI they are REGISTERED flow fields (so the halo can
         # fold ghost deposits + fill ghosts); single-rank they are standalone padded scratch.
@@ -321,6 +322,16 @@ class CfdDem:
             flow.enable_drag()  # drag_beta on the momentum diagonal + force_* (beta*u_p) in the RHS
         else:
             flow.enable_cell_force()  # explicit reaction force in force_x/y/z
+        # ONE PARTITION FROM CONSTRUCTION ON (user decision, 2026-09-25): a moving multi-rank run
+        # moves both codes onto the weighted ORB of the combined CFD + DEM cost now, through the
+        # same path as rebalance(). Before this, flow owned its init_mpi partition (splits snapped
+        # to powers of two) and dem the equal-cell ORB -- different blocks on a non-power-of-two
+        # grid (48^3 at np = 4: 32|16 vs 24|24), so particles were deposited into cells their rank
+        # does not own. A fixed bed (move_particles=False) never migrates dem, so its particles stay
+        # where the caller put them -- in flow's init_mpi block -- and flow must stay there too;
+        # rebalance() remains available when its dem is distributed.
+        if self.mpi and self.move_particles:
+            self._corebalance(_GAMMA, "construction")
         self.dem.set_dt(self.dt_dem)
         N = dem.num_particles  # this rank's OWNED count under MPI
         self._N = N
@@ -681,8 +692,9 @@ class CfdDem:
         if self.mpi and self.move_particles:
             self.dem.migrate_to_weights(self._weights, align=self._align)
         pos, vel = self._particles()
-        if self.mpi and self.move_particles and not self._colocation_checked:
+        if self.mpi and self.move_particles and not self._first_step_checked:
             self._assert_colocated(pos, "the first step")
+            self._first_step_checked = True
         self._resize_particles(pos.shape[0])
         self.update_void_fraction(pos)
         if self.porous and not getattr(self, "_porous_primed", False):
@@ -702,7 +714,7 @@ class CfdDem:
                 self.dem.step(self.dem_substeps)  # dt comes from set_dt (dem 1.0.0)
         self.flow.step()
 
-    def rebalance(self, gamma=1.0):
+    def rebalance(self, gamma=_GAMMA):
         """Dynamic co-rebalancing (multi-rank only). Build ONE weight field over the global grid --
         fluid work (1 per cell) + gamma * particle count -- and redistribute BOTH codes onto the same
         weighted ORB from it: the flow state via diagnostics.rebalance_by_weights (bit-exact
@@ -711,9 +723,18 @@ class CfdDem:
         the SAME deterministic partition from the same array and alignment, so they stay
         co-located; the moving step's per-step migration reuses both. Co-location is then asserted
         on every rank (every particle dem owns lies in flow's block) and a violation raises
-        RuntimeError on every rank. Call at a step boundary. No-op single-rank."""
+        RuntimeError on every rank. Call at a step boundary. No-op single-rank.
+
+        A moving multi-rank CfdDem already runs this once at construction, with the default gamma,
+        so the coupled run owns one partition from the start; call it again as the particle
+        distribution evolves."""
         if not self.mpi:
             return
+        self._corebalance(gamma, "rebalance()")
+
+    def _corebalance(self, gamma, where):
+        """rebalance()'s body: the combined weight field, then flow and dem onto its aligned
+        weighted ORB, then the co-location assertion (reported as raised at `where`)."""
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         gnx, gny, gnz = self.gnx, self.gny, self.gnz  # GLOBAL grid
@@ -738,16 +759,16 @@ class CfdDem:
         align = self._diag.rebalance_by_weights(w)
         if not isinstance(align, int) or align < 1:
             raise RuntimeError(
-                "CfdDem.rebalance: flow's rebalance_by_weights returned {!r}, not the alignment of "
-                "the partition it built -- this peclet.flow predates the aligned weighted ORB, and "
-                "dem cannot rebuild flow's partition without it".format(align))
+                "CfdDem ({}): flow's rebalance_by_weights returned {!r}, not the alignment of the "
+                "partition it built -- this peclet.flow predates the aligned weighted ORB, and "
+                "dem cannot rebuild flow's partition without it".format(where, align))
         self._align = align
         self.dem.migrate_to_weights(w, align=align)
         # flow's block moved -> refresh the deposit-origin shift, local extents and the smoothing's
         # open faces (which of this block's faces are interior rank boundaries can change).
         self._adopt_flow_block()
         pos, _ = self._particles()
-        self._assert_colocated(pos, "rebalance()")
+        self._assert_colocated(pos, where)
 
     def _assert_colocated(self, pos, where):
         """Fail loudly, on every rank, unless flow and dem own the same blocks.
@@ -795,9 +816,8 @@ class CfdDem:
                 "(rebalance_by_weights' return value); refusing to couple across a mismatch.{}"
                 .format(where, int(tot[0]), int(tot[1]), self._align, tuple(lo), tuple(n),
                         int(mine[0]),
-                        "" if self._colocation_checked else
-                        " Before any rebalance this means flow's init_mpi partition (splits snapped"
-                        " to powers of two) is not the equal-cell ORB dem migrates onto on this"
-                        " grid: call rebalance() before the first step, which moves both codes"
-                        " onto the same aligned weighted ORB."))
-        self._colocation_checked = True
+                        "" if where != "the first step" else
+                        " The construction-time co-rebalance put both codes on one partition, so"
+                        " one of them was re-partitioned since outside CfdDem.rebalance() (e.g."
+                        " flow's rebalance_by_weights or dem's rebalance/migrate_to_weights called"
+                        " directly)."))
