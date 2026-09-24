@@ -691,11 +691,16 @@ class CfdDem:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         gnx, gny, gnz = self.gnx, self.gny, self.gnz  # GLOBAL grid
-        # bin this rank's OWNED particles onto the global ORB grid, then sum across ranks.
+        # bin this rank's OWNED particles onto the global ORB grid, then sum across ranks. `_particles`
+        # hands back the solver's INDEX coordinates (global cells from the domain origin): on the
+        # cell-unit path those are the caller's positions (origin 0, spacing 1), on a physical-unit
+        # solver it has already subtracted the origin and divided by the spacing -- so the cell is
+        # floor(p) either way, and applying the physical map a second time would bin every particle
+        # into the wrong cell.
         pos, _ = self._particles()
         p = pos.get() if self.device else np.asarray(pos)
         counts = np.zeros((gnx, gny, gnz), dtype=np.float64)
-        idx = np.floor((p - np.asarray(self._org)) / self.h).astype(np.int64)
+        idx = np.floor(np.asarray(p, dtype=np.float64)).astype(np.int64)
         np.clip(idx[:, 0], 0, gnx - 1, out=idx[:, 0])
         np.clip(idx[:, 1], 0, gny - 1, out=idx[:, 1])
         np.clip(idx[:, 2], 0, gnz - 1, out=idx[:, 2])
