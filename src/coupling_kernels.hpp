@@ -199,7 +199,9 @@ void smoothField(FieldV f, FieldV tmp, GridMap m, int nsweeps, double alpha, int
     FieldV dst = (s % 2 == 0) ? tmp : f;
     Kokkos::parallel_for(
         "peclet::coupling::smooth",
-        Kokkos::MDRangePolicy<Exec, Kokkos::Rank<3>>({0, 0, 0}, {nx, ny, nz}),
+        // x fastest on every backend, never Kokkos' host default (z fastest): docs/CONVENTIONS.md §1
+        Kokkos::MDRangePolicy<Exec, Kokkos::Rank<3, Kokkos::Iterate::Left, Kokkos::Iterate::Left>>(
+            {0, 0, 0}, {nx, ny, nz}),
         KOKKOS_LAMBDA(int ix, int iy, int iz) {
           const long c = (long)(ix + g) + (long)(iy + g) * sy + (long)(iz + g) * sz;
           const double v = (double)src(c);
