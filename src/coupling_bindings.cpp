@@ -17,6 +17,7 @@
 
 #include <Kokkos_Core.hpp>
 #include <stdexcept>
+#include <string>
 
 #include "coupling_kernels.hpp"
 #include "peclet/core/python/kokkos_teardown.hpp"
@@ -65,6 +66,33 @@ VecfV vecf(const nb::ndarray<>& a, const char* who) {
 GridMap gmap(double ox, double oy, double oz, double h, int ex, int ey, int ez, int g) {
   return GridMap{ox, oy, oz, 1.0 / h, 1.0 / h, 1.0 / h, ex, ey, ez, g};
 }
+
+// Cross-module hand-off. flow, dem and this module each statically link their OWN Kokkos, hence
+// their own CUDA/HIP stream(s): nothing orders a kernel enqueued here against the next kernel flow
+// or dem enqueues on the SAME zero-copy arrays. This module owns that hand-off, so the rule is:
+// every wrapper that reads or writes arrays shared with flow/dem opens with a `HandOff` guard,
+// which fences on entry (never read another module's in-flight output) and on exit (the outputs
+// are complete before Python hands them to another module). The global Kokkos::fence() -- not an
+// execution-space instance's fence() -- is a DEVICE-wide synchronisation: in Kokkos 5.1.1 it is
+// Cuda::impl_static_fence -> cudaDeviceSynchronize (HIP: hipDeviceSynchronize) on every device this
+// Kokkos used, so it also waits for the other modules' streams. On a host backend the kernels are
+// already synchronous and the fence changes no number.
+// The bug it fixes: CfdDem.update_void_fraction ran compute_void_fraction on this module's stream,
+// then flow's exchange_field("eps") packed the ghosts on flow's stream -> stale eps ghosts
+// (mpi_polydisperse_moving np=4 on CUDA: rel-err 4.9e-3 vs tol 1e-4 in ~15-30 % of runs). The
+// smoothing loop (exchange_field("solidvol") then smooth_solid_volume) is the entry-side twin.
+struct HandOff {
+  explicit HandOff(const char* who) : who_(who) { Kokkos::fence(label(": enter")); }
+  ~HandOff() { Kokkos::fence(label(": exit")); }
+  HandOff(const HandOff&) = delete;
+  HandOff& operator=(const HandOff&) = delete;
+
+ private:
+  std::string label(const char* when) const {
+    return std::string("peclet::coupling::") + who_ + when;
+  }
+  const char* who_;
+};
 }  // namespace
 
 NB_MODULE(_coupling, m) {
@@ -77,6 +105,7 @@ NB_MODULE(_coupling, m) {
       "deposit_solid_volume",
       [](nb::ndarray<> pos, nb::ndarray<> rad, nb::ndarray<> solidvol, nb::ndarray<> sdf, double ox,
          double oy, double oz, double h, int ex, int ey, int ez, int g) {
+        const HandOff fence("deposit_solid_volume");
         auto sv = flatField(solidvol, "deposit_solid_volume(solidvol)");
         Kokkos::deep_copy(sv, 0.0);
         peclet::coupling::depositSolidVolume((int)pos.shape(0), vec3(pos, "pos"), vecf(rad, "rad"),
@@ -94,6 +123,7 @@ NB_MODULE(_coupling, m) {
       "smooth_solid_volume",
       [](nb::ndarray<> solidvol, double ox, double oy, double oz, double h, int ex, int ey, int ez,
          int g, int nsweeps, double alpha, int open_faces, double alpha_y, double alpha_z) {
+        const HandOff fence("smooth_solid_volume");
         auto sv = flatField(solidvol, "smooth_solid_volume(solidvol)");
         Kokkos::View<double*, MemSpace> owner("peclet::coupling::smooth_tmp", sv.extent(0));
         FlatV tmp(owner.data(), owner.extent(0));  // unmanaged alias: same View type as `sv`
@@ -117,6 +147,7 @@ NB_MODULE(_coupling, m) {
   m.def(
       "compute_void_fraction",
       [](nb::ndarray<> solidvol, nb::ndarray<> eps, double inv_vcell, double eps_min) {
+        const HandOff fence("compute_void_fraction");
         peclet::coupling::voidFraction(flatField(solidvol, "solidvol"), flatField(eps, "eps"),
                                        inv_vcell, eps_min);
       },
@@ -128,6 +159,7 @@ NB_MODULE(_coupling, m) {
       "interpolate_velocity",
       [](nb::ndarray<> pos, nb::ndarray<> uf, nb::ndarray<> vf, nb::ndarray<> wf, nb::ndarray<> out,
          double ox, double oy, double oz, double h, int ex, int ey, int ez, int g) {
+        const HandOff fence("interpolate_velocity");
         const GridMap mp = gmap(ox, oy, oz, h, ex, ey, ez, g);
         auto o = vec3(out, "interpolate_velocity(out)");
         const int np = (int)pos.shape(0);
@@ -149,6 +181,7 @@ NB_MODULE(_coupling, m) {
          nb::ndarray<> fdrag, nb::ndarray<> fx, nb::ndarray<> fy, nb::ndarray<> fz, double ox,
          double oy, double oz, double h, int ex, int ey, int ez, int g, double mu, double rho,
          double inv_vcell, int drag_kind, bool model_b, double dt_exch, double gx, double gy, double gz) {
+        const HandOff fence("compute_drag_feedback");
         const GridMap mp = gmap(ox, oy, oz, h, ex, ey, ez, g);
         auto Fx = flatField(fx, "fx"), Fy = flatField(fy, "fy"), Fz = flatField(fz, "fz");
         Kokkos::deep_copy(Fx, 0.0);
@@ -179,6 +212,7 @@ NB_MODULE(_coupling, m) {
          nb::ndarray<> fdrag, nb::ndarray<> dragbeta, nb::ndarray<> fx, nb::ndarray<> fy,
          nb::ndarray<> fz, double ox, double oy, double oz, double h, int ex, int ey, int ez, int g,
          double mu, double rho, double inv_vcell, int drag_kind, bool model_b, double dt_exch, double gx, double gy, double gz) {
+        const HandOff fence("compute_drag_implicit");
         const GridMap mp = gmap(ox, oy, oz, h, ex, ey, ez, g);
         auto Db = flatField(dragbeta, "drag_beta"), Fx = flatField(fx, "fx"),
              Fy = flatField(fy, "fy"), Fz = flatField(fz, "fz");
