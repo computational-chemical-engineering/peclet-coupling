@@ -75,8 +75,8 @@ def run_bed(f_drive, comm, eps_target=0.6, N=16, mu=1.0, rho=1.0, dt=0.5, steps=
     lw = float(np.asarray(s.get_w()).sum())
     gw = comm.allreduce(lw, MPI.SUM)
     U = gw / (N * N * N)
-    ep = cpl.last_eps
-    inner = np.asarray(ep[cpl.g:cpl.g + lnx, cpl.g:cpl.g + lny, cpl.g:cpl.g + lnz])
+    ep = cpl.last_eps.get() if cpl.device else np.asarray(cpl.last_eps)  # CuPy on a GPU build
+    inner = ep[cpl.g:cpl.g + lnx, cpl.g:cpl.g + lny, cpl.g:cpl.g + lnz]
     leps = float(inner.sum())
     geps = comm.allreduce(leps, MPI.SUM)
     eps_mean = geps / (N * N * N)

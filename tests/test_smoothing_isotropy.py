@@ -21,6 +21,13 @@ Run: PYTHONPATH=<coupling build> python tests/test_smoothing_isotropy.py   (or p
 import numpy as np
 from peclet.coupling import _coupling as C
 
+# The kernel takes arrays where this build's kernels run: NumPy on a host build, CuPy on a GPU one.
+_DEVICE = any(b in str(C.execution_space).lower() for b in ("cuda", "hip"))
+if _DEVICE:
+    import cupy as xp
+else:
+    xp = np
+
 N, G = 64, 2   # N large enough that the widest axis (h=0.5) stays clear of the walls
 E = N + 2 * G
 H = (1.0, 2.0, 0.5)          # a deliberately box-shaped cell
@@ -28,10 +35,11 @@ NSWEEP = 40
 
 
 def smooth(alpha, ayz):
-    f = np.zeros((E, E, E), order="F")
+    """Smooth a unit spike; returns a HOST array whatever the backend."""
+    f = xp.zeros((E, E, E), order="F")
     f[G + N // 2, G + N // 2, G + N // 2] = 1.0
     C.smooth_solid_volume(f, 0.0, 0.0, 0.0, 1.0, E, E, E, G, NSWEEP, alpha, 0, *ayz)
-    return f
+    return f.get() if _DEVICE else f
 
 
 def sigmas(f, h):

@@ -12,8 +12,11 @@ This test deposits a deterministic particle cloud, smooths, and checks:
   1. global solid-volume conservation (smoothing must not create/destroy hold-up), and
   2. the gathered global eps field matches the np=1 reference to ~machine precision.
 
-Run:  mpirun -np 1 python test_mpi_smoothing.py   (writes the reference)
-      mpirun -np {2,4} python test_mpi_smoothing.py
+Every rank count, np=1 included, is compared with the TRACKED reference `smoothing_ref_eps.npy`
+(the np=1 field). The test never writes that file: to regenerate it, run np=1 with
+PECLET_COUPLING_SMOOTHING_REF_OUT=<path> (the gathered field is saved there) and copy it over.
+
+Run:  mpirun -np {1,2,4} python test_mpi_smoothing.py
 """
 import os
 import numpy as np
@@ -102,16 +105,16 @@ def run(comm):
         geps = np.zeros((N, N, N))
         for (bx, by, bz), b in blocks:
             geps[bx:bx + b.shape[0], by:by + b.shape[1], bz:bz + b.shape[2]] = b
-        if size == 1:
-            np.save(REF_FILE, geps)
-            tag = "reference written"
-        elif os.path.exists(REF_FILE):
+        out = os.environ.get("PECLET_COUPLING_SMOOTHING_REF_OUT")
+        if size == 1 and out:  # explicit request only; never the tracked file by default
+            np.save(out, geps)
+        if os.path.exists(REF_FILE):
             ref = np.load(REF_FILE)
             err = float(np.max(np.abs(geps - ref)))
             ok = ok and err < 1e-12
-            tag = f"vs np=1 max|deps|={err:.3e}"
+            tag = f"vs np=1 reference max|deps|={err:.3e}"
         else:
-            tag = "NO REFERENCE (run np=1 first)"
+            tag = f"NO REFERENCE ({REF_FILE} missing)"
             ok = False
         print(f"[np={size}] conservation rel-err={cons_err:.3e}  {tag}")
         print(f"MPI SMOOTHING (np={size}): {'PASS' if ok else 'FAIL'}")
