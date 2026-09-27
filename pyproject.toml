@@ -45,7 +45,7 @@ classifiers = [
 
 # clean-break API (QUALITY_PLAN D1): the drivers use flow.spacing/cells/global_cells and dem's
 # initialize_shape/set_domain(extent=)/set_periodic, none of which exist below 1.0.0.
-dependencies = ["numpy>=1.20", "peclet-flow>=1.0.0", "peclet-dem>=1.0.0"]
+dependencies = ["numpy>=1.20", "peclet-flow>=1.2.0", "peclet-dem>=1.1.0"]
 
 [project.urls]
 Homepage = "https://github.com/computational-chemical-engineering/peclet"
