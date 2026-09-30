@@ -261,7 +261,11 @@ class ResolvedCfdDem:
         else:
             # (4, n, 3): F, tau, F_p, F_visc. flow's diagnostic name since 2026-09-30; the old
             # public `hydro_force_torque()` returns the same array but is deprecated (it warns).
-            ft = np.asarray(self.flow.diagnostics.hydro_force_torque_traction())
+            # flow <= 1.2.0 has no `diagnostics` namespace; its hydro_force_torque() is the same
+            # traction array, so fall back to it rather than break against the released wheel.
+            diag = getattr(self.flow, "diagnostics", None)
+            ft = np.asarray(diag.hydro_force_torque_traction() if diag is not None
+                            else self.flow.hydro_force_torque())
             self.last_force = np.array(ft[0][: self.n], dtype=np.float64)
             self.last_torque = np.array(ft[1][: self.n], dtype=np.float64)
             self.last_force_pressure = np.array(ft[2][: self.n], dtype=np.float64)
