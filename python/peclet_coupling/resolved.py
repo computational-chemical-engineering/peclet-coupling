@@ -23,7 +23,8 @@ nothing links them in C++. Per coupling step:
   2. flow.rebuild_geometry() -- re-derive SDF, cut-cell overlay, apertures and pressure operator;
      the velocity and pressure fields survive it;
   3. flow.step();
-  4. flow.hydro_force_torque() -> per-grain force; add gravity/buoyancy; hand to dem;
+  4. flow.hydro_force_torque_reaction() -> per-grain force (force_method="reaction", the
+     default); add gravity/buoyancy; hand to dem;
   5. dem sub-steps at the DEM timestep, holding the fluid force constant.
 
 WEAK, EXPLICIT COUPLING (spec: L4-R3). The fluid force is lagged by one fluid step. That is the
@@ -113,8 +114,9 @@ class ResolvedCfdDem:
     force_method : {"reaction", "traction"}, default "reaction"
         `"reaction"` uses the discrete momentum-reaction force (`flow.hydro_force_torque_reaction()`),
         exactly conservative. `"traction"` uses the reconstructed surface-traction integral
-        (`flow.hydro_force_torque()`), kept as a diagnostic; it under-reads the drag by a measured,
-        resolution-independent ~29%.
+        (`flow.diagnostics.hydro_force_torque_traction()`), kept as a diagnostic; it under-reads
+        the drag by a measured, resolution-independent ~30 % (traction / reaction 0.685-0.730),
+        and its torque by 28-41 %.
 
     Raises
     ------
@@ -257,7 +259,9 @@ class ResolvedCfdDem:
             self.last_force_pressure = None   # the reaction has no pressure/viscous split
             self.last_force_viscous = None
         else:
-            ft = np.asarray(self.flow.hydro_force_torque())   # (4, n, 3): F, tau, F_p, F_visc
+            # (4, n, 3): F, tau, F_p, F_visc. flow's diagnostic name since 2026-09-30; the old
+            # public `hydro_force_torque()` returns the same array but is deprecated (it warns).
+            ft = np.asarray(self.flow.diagnostics.hydro_force_torque_traction())
             self.last_force = np.array(ft[0][: self.n], dtype=np.float64)
             self.last_torque = np.array(ft[1][: self.n], dtype=np.float64)
             self.last_force_pressure = np.array(ft[2][: self.n], dtype=np.float64)

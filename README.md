@@ -100,8 +100,9 @@ step it pushes dem's positions / quaternions / velocities / angular velocities i
 instance transforms + rigid-body motion, `flow.rebuild_geometry()` re-derives the SDF, cut-cell
 overlay, apertures and pressure operator, the fluid steps, and the hydrodynamic load comes back —
 by default the **discrete reaction** (the momentum the fluid actually lost to each grain, exactly
-conservative), or the reconstructed traction integral with `force_method="traction"` (a
-diagnostic; it under-reads the drag by a resolution-independent ~29 %). Gravity/buoyancy is added
+conservative; flow's `hydro_force_torque_reaction()`), or the reconstructed traction integral with
+`force_method="traction"` (flow's `diagnostics.hydro_force_torque_traction()`, a diagnostic; it
+under-reads the drag by a resolution-independent ~30 %). Gravity/buoyancy is added
 (`rho_p`, `buoyancy`), the force (and, with `apply_torque=True`, the torque) is handed to dem, and
 dem sub-steps at the DEM timestep with the load held constant (weak, explicit coupling: the fluid
 load is lagged by one fluid step). Pure Python — no compiled kernels of its own, so it imports even
