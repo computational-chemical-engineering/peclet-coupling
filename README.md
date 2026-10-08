@@ -238,7 +238,7 @@ the single-rank pytest battery on every push.
 
 ## Follow-ups
 
-Kernel-width (vs trilinear) deposition smoothing; the `ρε` volume-averaged inertia and
-`∇·[εμ(∇u+∇uᵀ)]` viscous forms in the gas momentum (accuracy — see
-`flow/doc/porous_drag_scheme.md` §6); a PEA-style implicit particle-drag substep for very stiff
+Kernel-width (vs trilinear) deposition smoothing; the `∇·[εμ(∇u+∇uᵀ)]` viscous form in the gas
+momentum (accuracy — see `flow/doc/porous_drag_scheme.md` §6; the `ρε` volume-averaged inertia
+landed as the ε-conservative momentum + projection pair, flow `2d1564a`, default ON); a PEA-style implicit particle-drag substep for very stiff
 *moving* beds (`m_p/β < Δt` — the fluid side is already implicit).
