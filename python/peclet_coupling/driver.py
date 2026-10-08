@@ -70,9 +70,12 @@ class CfdDem:
         `"wen_yu"`, `"gidaspow"`, `"beetstra"`, `"tang"`.
     dem_substeps : int, default 20
         Number of DEM sub-steps per fluid step.
-    eps_min : float, default 0.25
-        Void-fraction floor: a physical regularisation (voidage does not physically fall below
-        random-close-packing values), not only a guard against numerical particle interpenetration.
+    eps_min : float, default 0.05
+        Void-fraction floor: a division guard for the 1/eps factors (drag closures, the porous
+        projection), not a physical packing limit -- the minimum voidage depends on particle shape
+        and size distribution, so the floor must not clamp real voidage. A trilinear deposit on
+        cells of about one particle diameter is noisy and can drive a cell's eps towards 0; use
+        `smooth_length` (~1.5 d_p) to make eps a proper volume average.
     smooth_length : float, default 0.0
         Physical width of the void-fraction (porosity) diffusion filter; `0.0` disables smoothing.
         A warning is raised if it is left too small relative to the particle diameter and the
@@ -108,7 +111,7 @@ class CfdDem:
     """
 
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
-                 dem_substeps=20, eps_min=0.25, smooth_length=0.0,
+                 dem_substeps=20, eps_min=0.05, smooth_length=0.0,
                  periodic=(True, True, True),
                  move_particles=True, implicit_drag=True, porous=True, advection=True,
                  gravity=(0.0, 0.0, 0.0)):
@@ -179,13 +182,12 @@ class CfdDem:
         self._rho_i = self.rho * float(self._us["density_to_internal"])
         self.dem_substeps = int(dem_substeps)
         self.dt_dem = self.fluid_dt / self.dem_substeps
-        # Void-fraction floor (default 0.25): a PHYSICAL regularisation, not just a guard. Real
-        # voidage bottoms out near random close packing (~0.36 monodisperse, ~0.25 for wide bidisperse
-        # mixes); anything lower can only come from numerically interpenetrated particles or deposit
-        # artifacts, and must not reach the volume-averaged fluid — the eps-conservative projection
-        # legitimately amplifies the interstitial velocity by 1/eps, so junk eps -> junk gas. 0.25
-        # keeps the Ergun/drag fidelity over the physical range (the old 0.4 clamp under-predicted
-        # dense-bed drag ~3x; the interim 0.05 guard let interpenetration artifacts detonate a bed).
+        # Void-fraction floor (default 0.05): a division guard for the 1/eps factors, NOT a packing
+        # limit (user decision 2026-10-08). The minimum physical voidage depends on particle shape
+        # and size distribution, so a floor at a "random close packing" value would cap the drag of
+        # dense non-spherical or polydisperse beds. Deposit noise at h ~ d_p is handled by
+        # smooth_length, not by the floor. (History: 0.4 under-predicted dense-bed drag ~3x; 0.25,
+        # 2026-07-16 .. 10-08, assumed a sphere-mixture packing limit.)
         self.eps_min = float(eps_min)
         # ---- POROSITY SMOOTHING: the filter width is a PHYSICAL LENGTH ------------------------
         #

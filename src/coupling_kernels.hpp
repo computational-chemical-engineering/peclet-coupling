@@ -220,10 +220,11 @@ void smoothField(FieldV f, FieldV tmp, GridMap m, int nsweeps, double alpha, int
     Kokkos::deep_copy(f, tmp);  // odd sweep count left the result in tmp
 }
 
-// eps = clamp(1 - solidvol/Vcell, epsMin, 1) over the whole (padded) field. With smoothing on and a
-// small epsMin, epsMin is only a divide-by-zero guard; the physical void fraction (which can fall
-// well below the random-close-packing 0.4 in a dense cell) is preserved instead of being clamped up —
-// clamping ε up to 0.4 under-predicts the Ergun 1/ε^3 drag ~3x in a dense bed and it never fluidizes.
+// eps = clamp(1 - solidvol/Vcell, epsMin, 1) over the whole (padded) field. epsMin is a division
+// guard (default 0.05), not a packing limit: the minimum physical voidage depends on particle shape
+// and size distribution (spheres ~0.36, wide bidisperse mixes and ellipsoids ~0.25, cubes -> 0), so
+// the floor must not clamp real voidage — clamping ε up to 0.4 under-predicted the Ergun 1/ε^3 drag
+// ~3x in a dense bed and it never fluidized.
 template <class FieldV>
 void voidFraction(FieldV solidvol, FieldV eps, double invVcell, double epsMin) {
   using Exec = Kokkos::DefaultExecutionSpace;

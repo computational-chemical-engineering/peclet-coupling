@@ -151,9 +151,9 @@ NB_MODULE(_coupling, m) {
         peclet::coupling::voidFraction(flatField(solidvol, "solidvol"), flatField(eps, "eps"),
                                        inv_vcell, eps_min);
       },
-      nb::arg("solidvol"), nb::arg("eps"), nb::arg("inv_vcell"), nb::arg("eps_min") = 0.25,
+      nb::arg("solidvol"), nb::arg("eps"), nb::arg("inv_vcell"), nb::arg("eps_min") = 0.05,
       "eps = clamp(1 - solidvol/Vcell, eps_min, 1), elementwise on the flat padded buffers. The "
-      "default floor 0.25 is the one CfdDem uses (a wide bidisperse random close packing).");
+      "default floor 0.05 is the one CfdDem uses: a division guard, not a packing limit.");
 
   m.def(
       "interpolate_velocity",

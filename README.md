@@ -34,14 +34,15 @@ Per fluid step (`CfdDem.step()`):
    fold the ghost deposits (periodic wrap on periodic axes; **same-side fold onto the boundary cell
    at a non-periodic domain face** — a grain resting on the distributor scatters part of its volume
    below z=0, and that hold-up belongs to the bottom cell, not to a ghost the fluid never owns), and
-   `ε = clamp(1 − Vsolid/Vcell, eps_min, 1)`. The floor `eps_min` defaults to **0.25**, a physical
-   regularisation rather than a guard: real voidage bottoms out near random close packing (~0.36
-   monodisperse, ~0.25 for wide bidisperse mixes), and anything lower can only come from
-   interpenetrated particles or deposit artefacts and must not reach the volume-averaged fluid
-   (whose projection amplifies the interstitial velocity by `1/ε`). The older 0.4 floor
-   under-predicted dense-bed drag ~3x; the interim 0.05 guard let interpenetration artefacts
-   detonate a bed. The same 0.25 is the kernel default (`_coupling.compute_void_fraction`); the
-   fixed-bed tests pass `eps_min=0.05` explicitly because their uniform lattice never clamps.
+   `ε = clamp(1 − Vsolid/Vcell, eps_min, 1)`. The floor `eps_min` defaults to **0.05**, a
+   division guard for the 1/ε factors (the drag closures, the porous projection), **not** a
+   physical packing limit: the minimum voidage depends on particle shape and size distribution
+   (spheres ~0.36, wide bidisperse mixes and ellipsoids ~0.25, space-filling shapes → 0), so the
+   floor must never clamp real voidage. A trilinear deposit on cells of about one particle
+   diameter is noisy and can push a cell's ε towards 0; set `smooth_length` (~1.5 d_p, the driver
+   warns below that) so ε is a proper volume average. The older 0.4 floor under-predicted
+   dense-bed drag ~3×; a 0.25 floor (2026-07-16 to 2026-10-08) assumed a sphere-mixture packing
+   limit. The same 0.05 is the kernel default (`_coupling.compute_void_fraction`).
    A particle whose trilinear stencil falls **outside the
    domain by more than one ghost layer** (e.g. pushed through a DEM wall by a violent contact solve)
    is dropped from the exchange entirely — no deposit, zero drag — so a runaway escapee can never
