@@ -319,9 +319,10 @@ class CfdDem:
         # Gas convection ON by default: fully-implicit FOU operator + explicit deferred-correction
         # TVD (unconditionally stable at the large coupled dt on both the periodic and domain-BC
         # paths). Without it the gas momentum has no inertia and freeboard velocities overshoot.
-        # advection=False restores a Stokes-like (drag+viscous+pressure only) gas.
+        # advection=False restores a Stokes-like (drag+viscous+pressure only) gas -- set
+        # explicitly: flow's own default is ON since its 2026-10-23 behaviour change.
+        flow.set_advection(bool(advection))
         if advection:
-            flow.set_advection(True)
             flow.set_implicit_advection(True)
 
         if self.implicit_drag:
