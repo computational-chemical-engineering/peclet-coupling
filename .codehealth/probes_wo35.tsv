@@ -1,0 +1,124 @@
+# np	case	before	after	after message (raised) or note
+np0	C.advection.0	silent	raised	TypeError: CfdDem: advection must be a bool, got None
+np0	C.advection.1	silent	raised	TypeError: CfdDem: advection must be a bool, got 'x'
+np0	C.cf.ok	valid	valid	
+np0	C.cf.pos_far	valid	valid	
+np0	C.cf.pos_nan	silent	raised	ValueError: CfdDem.compute_forces: pos[1, 2] must be finite (internal units), got nan
+np0	C.cf.pos_rows3	raised	raised	ValueError: CfdDem.compute_forces: pos must be an (2, 3) array, got shape (3, 3)
+np0	C.cf.vel_n2	raised	raised	ValueError: CfdDem.compute_forces: vel must be an (2, 3) array, got shape (2, 2)
+np0	C.cf.vel_nan	silent	raised	ValueError: CfdDem.compute_forces: vel[0, 0] must be finite (internal units), got nan
+np0	C.cf.vel_rows	silent	raised	ValueError: CfdDem.compute_forces: vel must be an (2, 3) array, got shape (1, 3)
+np0	C.dem_none	raised	raised	TypeError: CfdDem: dem must be a peclet.dem.Simulation, got NoneType
+np0	C.dem_substeps.0	raised	raised	ValueError: CfdDem: dem_substeps must be an integer >= 1, got 0
+np0	C.dem_substeps.1	raised	raised	ValueError: CfdDem: dem_substeps must be an integer >= 1, got -1
+np0	C.dem_substeps.2	silent	raised	TypeError: CfdDem: dem_substeps must be an integer >= 1, got 2.5
+np0	C.dem_substeps.3	raised	raised	TypeError: CfdDem: dem_substeps must be an integer >= 1, got 'x'
+np0	C.dem_substeps.4	raised	raised	TypeError: CfdDem: dem_substeps must be an integer >= 1, got nan
+np0	C.drag.0	raised	raised	ValueError: CfdDem: drag must be one of stokes, schiller_naumann, ergun, di_felice, wen_yu, gidaspow, beetstra, tang, got 'blob'
+np0	C.drag.1	raised	raised	ValueError: CfdDem: drag must be one of stokes, schiller_naumann, ergun, di_felice, wen_yu, gidaspow, beetstra, tang, got 3
+np0	C.eps_min.0	silent	raised	ValueError: CfdDem: eps_min must be in (0, 1) (dimensionless), got 0.0
+np0	C.eps_min.1	silent	raised	ValueError: CfdDem: eps_min must be in (0, 1) (dimensionless), got -0.1
+np0	C.eps_min.2	silent	raised	ValueError: CfdDem: eps_min must be in (0, 1) (dimensionless), got 1.0
+np0	C.eps_min.3	silent	raised	ValueError: CfdDem: eps_min must be in (0, 1) (dimensionless), got 1.5
+np0	C.eps_min.4	silent	raised	ValueError: CfdDem: eps_min must be in (0, 1) (dimensionless), got nan
+np0	C.flow_is_dem	raised	raised	TypeError: CfdDem: flow must be a peclet.flow.Solver, got Simulation
+np0	C.flow_none	raised	raised	TypeError: CfdDem: flow must be a peclet.flow.Solver, got NoneType
+np0	C.fluid_dt.0	raised	raised	ValueError: CfdDem: fluid_dt must be finite and > 0 (time units), got 0.0
+np0	C.fluid_dt.1	raised	raised	ValueError: CfdDem: fluid_dt must be finite and > 0 (time units), got -0.1
+np0	C.fluid_dt.2	raised	raised	ValueError: CfdDem: fluid_dt must be finite and > 0 (time units), got nan
+np0	C.fluid_dt.3	silent	raised	ValueError: CfdDem: fluid_dt must be finite and > 0 (time units), got inf
+np0	C.fluid_dt.4	raised	raised	TypeError: CfdDem: fluid_dt must be a real number (time units), got 'x'
+np0	C.gravity.0	silent	raised	TypeError: CfdDem: gravity must be 3 real numbers (length/time^2 units), got (0.0, 0.0)
+np0	C.gravity.1	silent	raised	ValueError: CfdDem: gravity[0] must be finite (length/time^2 units), got nan
+np0	C.gravity.2	silent	raised	ValueError: CfdDem: gravity[1] must be finite (length/time^2 units), got inf
+np0	C.gravity.3	raised	raised	TypeError: CfdDem: gravity must be 3 real numbers (length/time^2 units), got 5.0
+np0	C.implicit_drag.0	silent	raised	TypeError: CfdDem: implicit_drag must be a bool, got 'yes'
+np0	C.implicit_drag.1	silent	raised	TypeError: CfdDem: implicit_drag must be a bool, got 2
+np0	C.move_particles.0	silent	raised	TypeError: CfdDem: move_particles must be a bool, got 'no'
+np0	C.move_particles.1	silent	raised	TypeError: CfdDem: move_particles must be a bool, got None
+np0	C.move_particles.2	silent	raised	TypeError: CfdDem: move_particles must be a bool, got 2
+np0	C.mu.0	silent	raised	ValueError: CfdDem: mu must be finite and > 0 (dynamic viscosity units, mass/(length*time)), got 0.0
+np0	C.mu.1	silent	raised	ValueError: CfdDem: mu must be finite and > 0 (dynamic viscosity units, mass/(length*time)), got -1.0
+np0	C.mu.2	silent	raised	ValueError: CfdDem: mu must be finite and > 0 (dynamic viscosity units, mass/(length*time)), got nan
+np0	C.mu.3	silent	raised	ValueError: CfdDem: mu must be finite and > 0 (dynamic viscosity units, mass/(length*time)), got inf
+np0	C.mu.4	raised	raised	TypeError: CfdDem: mu must be a real number (dynamic viscosity units, mass/(length*time)), got 'x'
+np0	C.ok	valid	valid	
+np0	C.ok_array_radius	valid	valid	
+np0	C.periodic.0	silent	raised	TypeError: CfdDem: periodic must be a 3-sequence of bools (bx, by, bz), got (True, True)
+np0	C.periodic.1	raised	raised	TypeError: CfdDem: periodic must be a 3-sequence of bools (bx, by, bz), got True
+np0	C.periodic.2	silent	raised	TypeError: CfdDem: periodic must be a 3-sequence of bools (bx, by, bz), got 'abc'
+np0	C.periodic.3	silent	raised	TypeError: CfdDem: periodic must be a 3-sequence of bools (bx, by, bz), got (True, True, True, True)
+np0	C.porous.0	silent	raised	TypeError: CfdDem: porous must be a bool, got 'no'
+np0	C.porous.1	silent	raised	TypeError: CfdDem: porous must be a bool, got None
+np0	C.radius.0	silent	raised	ValueError: CfdDem: radius must be finite and > 0 (length units), got 0.0
+np0	C.radius.1	silent	raised	ValueError: CfdDem: radius must be finite and > 0 (length units), got -0.5
+np0	C.radius.2	silent	raised	ValueError: CfdDem: radius must be finite and > 0 (length units), got nan
+np0	C.radius.3	silent	raised	ValueError: CfdDem: radius must be finite and > 0 (length units), got inf
+np0	C.radius.4	silent	raised	ValueError: CfdDem: radius must be a scalar or an (2,) array of radii (dem.num_particles = 2), got shape (1,)
+np0	C.radius.5	silent	raised	ValueError: CfdDem: radius[1] must be finite and > 0 (length units), got -0.4
+np0	C.radius.6	silent	raised	ValueError: CfdDem: radius[1] must be finite and > 0 (length units), got nan
+np0	C.radius.7	silent	raised	ValueError: CfdDem: radius must be a scalar or an (2,) array of radii (dem.num_particles = 2), got shape (2, 1)
+np0	C.radius.8	silent	raised	ValueError: CfdDem: radius must be a scalar or an (2,) array of radii (dem.num_particles = 2), got shape (0,)
+np0	C.radius.9	raised	raised	TypeError: CfdDem: radius must be a real number (length units), got 'x'
+np0	C.rebalance.nan	silent	raised	ValueError: CfdDem.rebalance: gamma must be finite and >= 0 (dimensionless: cost of one particle in fluid cells), got nan
+np0	C.rebalance.neg	silent	raised	ValueError: CfdDem.rebalance: gamma must be finite and >= 0 (dimensionless: cost of one particle in fluid cells), got -1.0
+np0	C.rebalance.ok	valid	valid	
+np0	C.rebalance.str	silent	raised	TypeError: CfdDem.rebalance: gamma must be a real number (dimensionless: cost of one particle in fluid cells), got 'x'
+np0	C.rho.0	silent	raised	ValueError: CfdDem: rho must be finite and > 0 (density units, mass/length^3), got 0.0
+np0	C.rho.1	silent	raised	ValueError: CfdDem: rho must be finite and > 0 (density units, mass/length^3), got -1.0
+np0	C.rho.2	silent	raised	ValueError: CfdDem: rho must be finite and > 0 (density units, mass/length^3), got nan
+np0	C.rho.3	silent	raised	ValueError: CfdDem: rho must be finite and > 0 (density units, mass/length^3), got inf
+np0	C.rho.4	raised	raised	TypeError: CfdDem: rho must be a real number (density units, mass/length^3), got None
+np0	C.slip.ok	valid	valid	
+np0	C.slip.vel_n2	raised	raised	ValueError: CfdDem.slip: vel must be an (2, 3) array, got shape (2, 2)
+np0	C.slip.vel_rows	silent	raised	ValueError: CfdDem.slip: vel must be an (2, 3) array, got shape (1, 3)
+np0	C.smooth_length.0	silent	raised	ValueError: CfdDem: smooth_length must be finite and >= 0 (length units; 0 disables the filter), got -1.0
+np0	C.smooth_length.1	silent	raised	ValueError: CfdDem: smooth_length must be finite and >= 0 (length units; 0 disables the filter), got nan
+np0	C.smooth_length.2	raised	raised	ValueError: CfdDem: smooth_length must be finite and >= 0 (length units; 0 disables the filter), got inf
+np0	C.smooth_length.3	raised	raised	TypeError: CfdDem: smooth_length must be a real number (length units; 0 disables the filter), got 'x'
+np0	C.uvf.1d	silent	raised	ValueError: CfdDem.update_void_fraction: pos must be an (2, 3) array, got shape (6,)
+np0	C.uvf.empty	valid	valid	
+np0	C.uvf.f64	raised	raised	RuntimeError: pos: array dtype does not match the expected scalar
+np0	C.uvf.far	valid	valid	
+np0	C.uvf.n2	silent	raised	ValueError: CfdDem.update_void_fraction: pos must be an (2, 3) array, got shape (2, 2)
+np0	C.uvf.nan	silent	raised	ValueError: CfdDem.update_void_fraction: pos[0, 0] must be finite (internal units), got nan
+np0	C.uvf.neg	valid	valid	
+np0	C.uvf.ok	valid	valid	
+np0	C.uvf.rows1000	silent	raised	ValueError: CfdDem.update_void_fraction: pos must be an (2, 3) array, got shape (1000, 3)
+np0	C.uvf.rows3	silent	raised	ValueError: CfdDem.update_void_fraction: pos must be an (2, 3) array, got shape (3, 3)
+np0	R.apply_torque.0	silent	raised	TypeError: ResolvedCfdDem: apply_torque must be a bool, got 'x'
+np0	R.buoyancy.0	silent	raised	TypeError: ResolvedCfdDem: buoyancy must be a bool, got None
+np0	R.dem_none	raised	raised	TypeError: ResolvedCfdDem: dem must be a peclet.dem.Simulation, got NoneType
+np0	R.dem_substeps.0	raised	raised	ValueError: ResolvedCfdDem: dem_substeps must be an integer >= 1, got 0
+np0	R.dem_substeps.1	raised	raised	ValueError: ResolvedCfdDem: dem_substeps must be an integer >= 1, got -2
+np0	R.dem_substeps.2	silent	raised	TypeError: ResolvedCfdDem: dem_substeps must be an integer >= 1, got 2.5
+np0	R.flow_none	raised	raised	TypeError: ResolvedCfdDem: flow must be a peclet.flow.Solver, got NoneType
+np0	R.fluid_dt.0	raised	raised	ValueError: ResolvedCfdDem: fluid_dt must be finite and > 0 (time units), got 0.0
+np0	R.fluid_dt.1	raised	raised	ValueError: ResolvedCfdDem: fluid_dt must be finite and > 0 (time units), got -0.1
+np0	R.fluid_dt.2	raised	raised	ValueError: ResolvedCfdDem: fluid_dt must be finite and > 0 (time units), got nan
+np0	R.fluid_dt.3	silent	raised	ValueError: ResolvedCfdDem: fluid_dt must be finite and > 0 (time units), got inf
+np0	R.force_method.0	raised	raised	ValueError: force_method must be 'reaction' or 'traction'
+np0	R.gravity.0	silent	raised	ValueError: ResolvedCfdDem: gravity[0] must be finite (length/time^2 units), got nan
+np0	R.gravity.1	silent	raised	TypeError: ResolvedCfdDem: gravity must be 3 real numbers (length/time^2 units), got (0, 0)
+np0	R.gravity.2	silent	raised	ValueError: ResolvedCfdDem: gravity[1] must be finite (length/time^2 units), got inf
+np0	R.move_particles.0	silent	raised	TypeError: ResolvedCfdDem: move_particles must be a bool, got 'no'
+np0	R.mu.0	silent	raised	ValueError: ResolvedCfdDem: mu must be finite and >= 0 (dynamic viscosity units, mass/(length*time)), got -1.0
+np0	R.mu.1	silent	raised	ValueError: ResolvedCfdDem: mu must be finite and >= 0 (dynamic viscosity units, mass/(length*time)), got nan
+np0	R.mu.2	silent	raised	ValueError: ResolvedCfdDem: mu must be finite and >= 0 (dynamic viscosity units, mass/(length*time)), got inf
+np0	R.mu_zero	valid	valid	
+np0	R.ok	valid	valid	
+np0	R.periodic.0	raised	raised	ValueError: ResolvedCfdDem: periodic=(True, False, True) is mixed; the flow scene supports only an all-periodic or a non-periodic box (set_scene periodic images are per box).
+np0	R.periodic.1	raised	raised	TypeError: periodic must be a 3-sequence of bools (bx, by, bz), like CfdDem's
+np0	R.periodic.2	raised	raised	TypeError: periodic must be a 3-sequence of bools (bx, by, bz), like CfdDem's
+np0	R.radius.0	silent	raised	ValueError: ResolvedCfdDem: radius must be finite and > 0 (length units), got 0.0
+np0	R.radius.1	silent	raised	ValueError: ResolvedCfdDem: radius must be finite and > 0 (length units), got -0.5
+np0	R.radius.2	silent	raised	ValueError: ResolvedCfdDem: radius must be finite and > 0 (length units), got nan
+np0	R.radius.3	silent	raised	ValueError: ResolvedCfdDem: radius must be finite and > 0 (length units), got inf
+np0	R.radius.4	raised	raised	TypeError: ResolvedCfdDem: radius must be a real number (length units), got array([0.5, 0.5])
+np0	R.rho.0	silent	raised	ValueError: ResolvedCfdDem: rho must be finite and > 0 (density units, mass/length^3), got 0.0
+np0	R.rho.1	silent	raised	ValueError: ResolvedCfdDem: rho must be finite and > 0 (density units, mass/length^3), got -1.0
+np0	R.rho.2	silent	raised	ValueError: ResolvedCfdDem: rho must be finite and > 0 (density units, mass/length^3), got nan
+np0	R.rho_p.0	silent	raised	ValueError: ResolvedCfdDem: rho_p must be finite and > 0 (density units, mass/length^3), got -1.0
+np0	R.rho_p.1	silent	raised	ValueError: ResolvedCfdDem: rho_p must be finite and > 0 (density units, mass/length^3), got 0.0
+np0	R.rho_p.2	silent	raised	ValueError: ResolvedCfdDem: rho_p must be finite and > 0 (density units, mass/length^3), got nan
+np0	R.rho_p.3	silent	raised	ValueError: ResolvedCfdDem: rho_p must be finite and > 0 (density units, mass/length^3), got inf

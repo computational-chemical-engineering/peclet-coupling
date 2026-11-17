@@ -91,7 +91,7 @@ jobs:
           # the pure-Python drivers are staged beside the extension (configure_file does it at
           # configure time; re-copy so an edit after configure can never test a stale driver)
           cp python/peclet_coupling/__init__.py python/peclet_coupling/driver.py \
-             python/peclet_coupling/resolved.py build/peclet/coupling/
+             python/peclet_coupling/resolved.py python/peclet_coupling/_checks.py build/peclet/coupling/
 
       - name: Import smoke test
         env:
@@ -105,4 +105,4 @@ jobs:
           OMP_NUM_THREADS: "2"
           OMP_PROC_BIND: "false"
         run: |
-          python3 -m pytest tests -q -k "terminal or ergun or isotropy" -p no:cacheprovider
+          python3 -m pytest tests -q -k "terminal or ergun or isotropy or input_validation" -p no:cacheprovider

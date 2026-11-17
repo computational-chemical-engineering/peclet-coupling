@@ -1,0 +1,175 @@
+# cce-code-health gate for peclet.coupling, user-facing round WO-35. Adapted from core-health-api's.
+#
+# Run with PECLET_SUITE=<suite checkout> and PECLET_COUPLING_DEPS=<dir> set: <dir>/flow and <dir>/dem are host-openmp
+# (MPI) build trees of peclet.flow and peclet.dem, built against the SAME Kokkos prefix as this build (one Kokkos per
+# process). WO-35 built them from flow f5f0b87 and dem 9c36779 into coupling-health-api/build_deps/. The base side
+# builds under <git-common-dir>/codehealth/base-<sha>, where no sibling ../core exists: core's headers are pinned to
+# $PECLET_SUITE/core on both sides.
+#
+# coupling has no state_hash.py: the drive_hash tier is one inline, deterministic run (a CfdDem step with porous
+# deposit + drag, a ResolvedCfdDem step) whose drag, void fraction, fluid velocity and hydrodynamic force are hashed
+# byte for byte. The api tier dumps inspect.signature of every public name plus the extension's __nb_signature__s.
+# Traps: OMP_NUM_THREADS=1 (bitwise at one thread). Every tier configures and builds for itself: the base side
+# runs only the behaviour tiers (no build_host), so a tier that assumed build_host's tree found none (WO-35).
+schema = 1
+
+[profiles]
+python = "python@0"
+cpp = "cpp@0"
+
+[scope]
+include = ["python/*", "src/*"]
+
+[gate]
+frozen = ["cmake/*"]
+forbid = []
+literals = false
+public_api = false
+flags = true
+keep_going = false
+prefix = ': "${PECLET_SUITE:?set PECLET_SUITE to the suite checkout}" && : "${PECLET_COUPLING_DEPS:?set PECLET_COUPLING_DEPS to a dir with host flow/ and dem/ builds}" && export VIRTUAL_ENV="$PECLET_SUITE/.venv" PATH="$PECLET_SUITE/.venv/bin:$PATH" &&'
+
+[gate.env]
+OMP_NUM_THREADS = "1"
+OMP_PROC_BIND = "false"
+OPENBLAS_NUM_THREADS = "1"
+MKL_NUM_THREADS = "1"
+PYTHONHASHSEED = "0"
+PYTHONWARNINGS = "ignore"
+
+[[gate.tier]]
+name = "build_host"
+kind = "command"
+behaviour = false
+cadence = "step"
+timeout = 900
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$PECLET_SUITE/core "-DFETCHCONTENT_SOURCE_DIR_PECLET_SIB_PECLET-CORE=$PECLET_SUITE/core" \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DPECLET_COUPLING_TESTS=ON \
+  -DPECLET_FLOW_BUILD=$PECLET_COUPLING_DEPS/flow -DPECLET_DEM_BUILD=$PECLET_COUPLING_DEPS/dem \
+  && cmake --build {repo}/build_health_host -j16'''
+
+[[gate.tier]]
+name = "ctest_host"
+kind = "command"
+cadence = "step"
+timeout = 2400
+skip_exit = 77
+fail_regex = '\*\*\*Skipped|Not Run|No tests were found'
+detect_exit = [8]
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$PECLET_SUITE/core "-DFETCHCONTENT_SOURCE_DIR_PECLET_SIB_PECLET-CORE=$PECLET_SUITE/core" \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DPECLET_COUPLING_TESTS=ON \
+  -DPECLET_FLOW_BUILD=$PECLET_COUPLING_DEPS/flow -DPECLET_DEM_BUILD=$PECLET_COUPLING_DEPS/dem >/dev/null \
+  && cmake --build {repo}/build_health_host -j16 >/dev/null \
+  && ctest --test-dir {repo}/build_health_host -j1 --timeout 1200 --output-on-failure'''
+
+[[gate.tier]]
+name = "drive_hash"
+kind = "reference"
+cadence = "step"
+timeout = 900
+outputs = ["hashes.txt"]
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$PECLET_SUITE/core "-DFETCHCONTENT_SOURCE_DIR_PECLET_SIB_PECLET-CORE=$PECLET_SUITE/core" \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DPECLET_COUPLING_TESTS=ON \
+  -DPECLET_FLOW_BUILD=$PECLET_COUPLING_DEPS/flow -DPECLET_DEM_BUILD=$PECLET_COUPLING_DEPS/dem >/dev/null \
+  && cmake --build {repo}/build_health_host -j16 >/dev/null \
+  && PYTHONPATH={repo}/build_health_host:$PECLET_COUPLING_DEPS/flow:$PECLET_COUPLING_DEPS/dem \
+     python - > {out}/hashes.txt <<'PY' || exit 1
+import hashlib
+
+import numpy as np
+import peclet.dem
+import peclet.flow
+from peclet.coupling import CfdDem, ResolvedCfdDem
+
+N = 12
+
+
+def h(*arrays):
+    d = hashlib.sha256()
+    for a in arrays:
+        a = np.ascontiguousarray(np.asarray(a))
+        d.update(str(a.dtype).encode() + str(a.shape).encode() + a.tobytes())
+    return d.hexdigest()
+
+
+def bed(n):
+    s = peclet.flow.Solver(N, N, N)
+    s.set_rho(1.0)
+    s.set_mu(0.5)
+    s.set_dt(0.1)
+    d = peclet.dem.Simulation(n)
+    d.initialize_shape("sphere", radius=0.6)
+    d.set_domain(extent=(N, N, N), periodic=(True, True, True))
+    rng = np.random.default_rng(7)
+    p = np.ones((n, 4), dtype=np.float32)
+    p[:, :3] = 2.0 + rng.random((n, 3)) * (N - 4)
+    d.set_positions(p)
+    d.set_velocities((rng.random((n, 3)) - 0.5).astype(np.float32))
+    return s, d
+
+
+for porous, drag in ((True, "beetstra"), (False, "schiller_naumann")):
+    s, d = bed(6)
+    c = CfdDem(s, d, fluid_dt=0.1, mu=0.5, rho=1.0, radius=0.6, drag=drag, dem_substeps=4,
+               porous=porous, smooth_length=1.8, gravity=(0.0, 0.0, -1e-3))
+    for _ in range(2):
+        c.step()
+    print(f"cfddem.porous={porous}.{drag} {h(c.last_drag, c.last_slip, c.last_eps, s.get_u(), s.get_w(), d.get_positions())}")
+s, d = bed(2)
+r = ResolvedCfdDem(s, d, radius=1.5, mu=0.5, rho=1.0, fluid_dt=0.1, dem_substeps=4, rho_p=2.0,
+                   gravity=(0.0, 0.0, -1e-3))
+r.step()
+print(f"resolved {h(r.last_force, r.last_torque, s.get_u(), d.get_positions())}")
+PY
+test -s {out}/hashes.txt && cat {out}/hashes.txt'''
+
+# API identity: the pure-Python drivers' inspect.signature (names, defaults, keyword-only markers) and every
+# __nb_signature__ of the _coupling extension. Docstrings excluded; base and head must print the same bytes.
+[[gate.tier]]
+name = "api_signatures"
+kind = "reference"
+cadence = "step"
+timeout = 600
+outputs = ["signatures.txt"]
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$PECLET_SUITE/core "-DFETCHCONTENT_SOURCE_DIR_PECLET_SIB_PECLET-CORE=$PECLET_SUITE/core" \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DPECLET_COUPLING_TESTS=ON \
+  -DPECLET_FLOW_BUILD=$PECLET_COUPLING_DEPS/flow -DPECLET_DEM_BUILD=$PECLET_COUPLING_DEPS/dem >/dev/null \
+  && cmake --build {repo}/build_health_host -j16 >/dev/null \
+  && PYTHONPATH={repo}/build_health_host:$PECLET_COUPLING_DEPS/flow:$PECLET_COUPLING_DEPS/dem \
+     python - > {out}/signatures.txt <<'PY' || exit 1
+import inspect
+
+import peclet.coupling as pkg
+import peclet.coupling._coupling as ext
+
+out = []
+for n in sorted(getattr(pkg, "__all__", [k for k in dir(pkg) if not k.startswith("_")])):
+    o = getattr(pkg, n)
+    if inspect.isclass(o):
+        out.append(f"class {n}{inspect.signature(o.__init__)}")
+        for k, v in sorted(vars(o).items()):
+            if k.startswith("_"):
+                continue
+            if isinstance(v, property):
+                out.append(f"  {n}.{k} property")
+            elif callable(v):
+                out.append(f"  {n}.{k}{inspect.signature(v)}")
+    else:
+        out.append(f"{n} = {o!r}")
+for n in sorted(dir(ext)):
+    if n.startswith("__"):
+        continue
+    o = getattr(ext, n)
+    s = getattr(o, "__nb_signature__", None)
+    out += [f"_coupling.{n} {t[0]} defaults={t[2]!r}" for t in s] if s else [f"_coupling.{n} = <{type(o).__name__}>"]
+print("\n".join(out))
+PY
+test -s {out}/signatures.txt && cat {out}/signatures.txt'''
