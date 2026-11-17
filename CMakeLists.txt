@@ -57,6 +57,8 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/driver.py
 # resolved.py is imported by __init__.py, so omitting it makes a dev build unimportable.
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/resolved.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/coupling/resolved.py COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/_checks.py
+               ${CMAKE_CURRENT_BINARY_DIR}/peclet/coupling/_checks.py COPYONLY)
 target_include_directories(coupling PRIVATE src "${CORE_INC}")
 target_link_libraries(coupling PRIVATE Kokkos::kokkos)
 if(Kokkos_ENABLE_HIP)
@@ -83,5 +85,6 @@ if(DEFINED SKBUILD)
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/__init__.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/driver.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/resolved.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/python/peclet_coupling/_checks.py
           DESTINATION peclet/coupling COMPONENT python)
 endif()

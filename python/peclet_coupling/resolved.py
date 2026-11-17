@@ -54,6 +54,8 @@ results are the `last_force` / `last_torque` arrays (N,3), like CfdDem's `last_d
 """
 import numpy as np
 
+from . import _checks
+
 
 class ResolvedCfdDem:
     """Resolved (geometry-resolving) CFD-DEM coupling of a `peclet.flow.Solver` scene and a
@@ -130,6 +132,7 @@ class ResolvedCfdDem:
                  periodic=(True, True, True), gravity=(0.0, 0.0, 0.0), rho_p=None,
                  move_particles=True, buoyancy=True, apply_torque=False,
                  force_method="reaction"):
+        _checks.resolved_cfd_dem(locals())  # every argument as passed, before anything is converted
         self.flow = flow
         self.dem = dem
         self.mu = float(mu)

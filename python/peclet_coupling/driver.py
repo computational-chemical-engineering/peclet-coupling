@@ -19,6 +19,8 @@ deposits, fill for reads) is done here in NumPy on the padded (ex,ey,ez) buffers
 """
 import numpy as np
 
+from . import _checks
+
 # The particle weight of the combined CFD + DEM cost field, 1 + gamma x (particles in the cell): the
 # default of rebalance(gamma) and the value the construction-time co-rebalance uses. Calibrating it
 # against measured per-cell costs is deferred (user decision, 2026-09-25).
@@ -115,6 +117,7 @@ class CfdDem:
                  periodic=(True, True, True),
                  move_particles=True, implicit_drag=True, porous=True, advection=True,
                  gravity=(0.0, 0.0, 0.0)):
+        _checks.cfd_dem(locals())  # every argument as passed, before anything is converted
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
                        DRAG_WEN_YU, DRAG_GIDASPOW, DRAG_BEETSTRA, DRAG_TANG)
         self._c = _coupling
@@ -554,6 +557,13 @@ class CfdDem:
         Returns nothing. Sets `self._eps` (read by `compute_forces`, and copied to `self.last_eps`
         by `step()`) to the updated void-fraction field.
         """
+        _checks.rows3("CfdDem.update_void_fraction", "pos", pos, self._rad.shape[0])
+        _checks.finite_rows("CfdDem.update_void_fraction", "pos", pos, self.xp)
+        self._update_void_fraction(pos)
+
+    def _update_void_fraction(self, pos):
+        # The body of update_void_fraction, which step() calls directly: its pos comes from dem, so
+        # the step path pays no shape check and no finiteness reduction (a device sync on a GPU).
         # deposit target: a registered flow field under MPI (so the halo folds ghost deposits + fills
         # ghosts), standalone scratch single-rank.
         sv = self._fv("solidvol") if self._eps_is_field else self._solidvol
@@ -626,6 +636,15 @@ class CfdDem:
         Returns nothing; results are read back from `last_drag` and `last_slip`, and the fluid's
         momentum fields now carry the feedback for the next `flow.step()`.
         """
+        n = self._fdrag.shape[0]
+        _checks.rows3("CfdDem.compute_forces", "pos", pos, n)
+        _checks.rows3("CfdDem.compute_forces", "vel", vel, n)
+        _checks.finite_rows("CfdDem.compute_forces", "pos", pos, self.xp)
+        _checks.finite_rows("CfdDem.compute_forces", "vel", vel, self.xp)
+        self._compute_forces(pos, vel)
+
+    def _compute_forces(self, pos, vel):
+        # The body of compute_forces, which step() calls directly (see _update_void_fraction).
         for name in ("u", "v", "w"):
             self._diag.exchange_field(name)
         uf, vf, wf = (self._fv(n) for n in ("u", "v", "w"))
@@ -688,6 +707,8 @@ class CfdDem:
     def slip(self, pos, vel):
         """Interpolated fluid velocity minus particle velocity (N,3) — what the drag law sees.
         `vel` may be host or device; returns a host NumPy array for convenient inspection."""
+        _checks.rows3("CfdDem.slip", "pos", pos, self._ufluid.shape[0])
+        _checks.rows3("CfdDem.slip", "vel", vel, self._ufluid.shape[0])
         s = self._ufluid - self.xp.asarray(vel)
         return s.get() if self.device else s
 
@@ -742,11 +763,11 @@ class CfdDem:
             self._assert_colocated(pos, "the first step")
             self._first_step_checked = True
         self._resize_particles(pos.shape[0])
-        self.update_void_fraction(pos)
+        self._update_void_fraction(pos)
         if self.porous and not getattr(self, "_porous_primed", False):
             self.flow.sync_porous_prev()  # first deposit: eps^n=eps^{n+1} so no spurious d(eps)/dt
             self._porous_primed = True
-        self.compute_forces(pos, vel)
+        self._compute_forces(pos, vel)
         self.last_eps = self._eps
         if self.move_particles:
             # Write the drag straight into dem's external-force buffer ON DEVICE (zero-copy view) — no
@@ -774,6 +795,8 @@ class CfdDem:
         A moving multi-rank CfdDem already runs this once at construction, with the default gamma,
         so the coupled run owns one partition from the start; call it again as the particle
         distribution evolves."""
+        _checks.nonneg("CfdDem.rebalance", "gamma", gamma, "dimensionless: cost of one particle "
+                       "in fluid cells")
         if not self.mpi:
             return
         self._corebalance(gamma, "rebalance()")
