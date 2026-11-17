@@ -12,6 +12,8 @@ dimension (in the caller's consistent unit system, the one `flow` uses) and the 
 
 ValueError for an inadmissible value, TypeError for a value of the wrong kind.
 """
+import functools
+import inspect
 import math
 import numbers
 
@@ -122,10 +124,14 @@ def radius(who, value, n):
         raise ValueError(f"{who}: radius[{i}] must be finite and > 0 (length units), got {float(a[i])!r}")
 
 
-def rows3(who, name, a, n=None):
-    """An (n, 3) particle array; `n` None accepts any row count."""
+def rows3(who, name, a, n=None, empty_ok=False):
+    """An (n, 3) particle array; `n` None accepts any row count, `empty_ok` also (0, 3) (a rank that
+    owns no particles: documented as valid for update_void_fraction)."""
     shape = getattr(a, "shape", None)
-    if shape is None or len(shape) != 2 or shape[1] != 3 or (n is not None and shape[0] != n):
+    ok = shape is not None and len(shape) == 2 and shape[1] == 3
+    if ok and n is not None:
+        ok = shape[0] == n or (empty_ok and shape[0] == 0)
+    if not ok:
         want = "(N, 3)" if n is None else f"({n}, 3)"
         raise ValueError(f"{who}: {name} must be an {want} array, got shape {shape}")
 
@@ -139,10 +145,30 @@ def finite_rows(who, name, a, xp):
         raise ValueError(f"{who}: {name}[{i}, {j}] must be finite (internal units), got {float(a[i, j])!r}")
 
 
+def arguments(check):
+    """Decorator for a constructor: run `check` on its arguments by name (defaults applied, `self`
+    included) before the body runs. The signature is the wrapped function's (functools.wraps), and a
+    call that does not bind is passed through so Python raises its own TypeError for it."""
+    def wrap(f):
+        sig = inspect.signature(f)
+
+        @functools.wraps(f)
+        def checked(*args, **kwargs):
+            try:
+                bound = sig.bind(*args, **kwargs)
+            except TypeError:
+                return f(*args, **kwargs)
+            bound.apply_defaults()
+            check(bound.arguments)
+            return f(*args, **kwargs)
+        return checked
+    return wrap
+
+
 # --- the constructors' argument sets -------------------------------------------------------------
 
 def cfd_dem(a):
-    """CfdDem.__init__'s arguments, as its locals() at entry."""
+    """CfdDem.__init__'s arguments, by name."""
     who = "CfdDem"
     solver(who, a["flow"])
     simulation(who, a["dem"])
@@ -161,8 +187,8 @@ def cfd_dem(a):
 
 
 def resolved_cfd_dem(a):
-    """ResolvedCfdDem.__init__'s arguments, as its locals() at entry. periodic and force_method
-    keep the driver's own checks (a mixed triple is a ValueError there)."""
+    """ResolvedCfdDem.__init__'s arguments, by name. periodic and force_method keep the driver's own
+    checks (a mixed triple is a ValueError there)."""
     who = "ResolvedCfdDem"
     solver(who, a["flow"])
     simulation(who, a["dem"])

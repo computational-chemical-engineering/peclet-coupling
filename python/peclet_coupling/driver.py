@@ -116,12 +116,12 @@ class CfdDem:
         flag is refused: `bool("no")` is True), or `periodic`/`gravity` is not a 3-sequence.
     """
 
+    @_checks.arguments(_checks.cfd_dem)  # every argument as passed, before any conversion
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
                  dem_substeps=20, eps_min=0.05, smooth_length=0.0,
                  periodic=(True, True, True),
                  move_particles=True, implicit_drag=True, porous=True, advection=True,
                  gravity=(0.0, 0.0, 0.0)):
-        _checks.cfd_dem(locals())  # every argument as passed, before anything is converted
         from . import (_coupling, DRAG_STOKES, DRAG_SCHILLER_NAUMANN, DRAG_ERGUN, DRAG_DI_FELICE,
                        DRAG_WEN_YU, DRAG_GIDASPOW, DRAG_BEETSTRA, DRAG_TANG)
         self._c = _coupling
@@ -561,7 +561,7 @@ class CfdDem:
         Returns nothing. Sets `self._eps` (read by `compute_forces`, and copied to `self.last_eps`
         by `step()`) to the updated void-fraction field.
         """
-        _checks.rows3("CfdDem.update_void_fraction", "pos", pos, self._rad.shape[0])
+        _checks.rows3("CfdDem.update_void_fraction", "pos", pos, self._rad.shape[0], True)
         _checks.finite_rows("CfdDem.update_void_fraction", "pos", pos, self.xp)
         self._update_void_fraction(pos)
 

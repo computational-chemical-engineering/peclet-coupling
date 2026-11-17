@@ -131,11 +131,11 @@ class ResolvedCfdDem:
         number or flag has the wrong kind (a string flag is refused).
     """
 
+    @_checks.arguments(_checks.resolved_cfd_dem)  # every argument as passed, before any conversion
     def __init__(self, flow, dem, *, radius, mu, rho, fluid_dt, dem_substeps=20,
                  periodic=(True, True, True), gravity=(0.0, 0.0, 0.0), rho_p=None,
                  move_particles=True, buoyancy=True, apply_torque=False,
                  force_method="reaction"):
-        _checks.resolved_cfd_dem(locals())  # every argument as passed, before anything is converted
         self.flow = flow
         self.dem = dem
         self.mu = float(mu)

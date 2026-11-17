@@ -153,6 +153,7 @@ def test_methods_accept():
     c.update_void_fraction(P2)
     c.compute_forces(P2, V2)
     assert c.slip(P2, V2).shape == (2, 3)
+    c.update_void_fraction(np.zeros((0, 3), np.float32))  # a rank that owns no particles
 
 
 @pytest.mark.parametrize("gamma, exc", [(-1.0, ValueError), (NAN, ValueError), ("x", TypeError)])
