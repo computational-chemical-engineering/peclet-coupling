@@ -52,16 +52,16 @@ class CfdDem:
         The Lagrangian particle simulation; `dem.num_particles` is this rank's OWNED particle count
         under MPI.
     fluid_dt : float
-        The fluid time step, in the flow solver's own units (physical time if `flow` was built with
-        `extent=`, otherwise cell time). DEM advances `dem_substeps` sub-steps of
+        The fluid time step, > 0, in the flow solver's own units (physical time if `flow` was built
+        with `extent=`, otherwise cell time). DEM advances `dem_substeps` sub-steps of
         `fluid_dt / dem_substeps` each, holding the drag constant over them.
     mu : float
-        Fluid dynamic viscosity, in the caller's consistent unit system (the same system `flow`
-        itself uses).
+        Fluid dynamic viscosity, > 0 (the drag laws divide by it), in the caller's consistent unit
+        system (the same system `flow` itself uses).
     rho : float
-        Fluid density, in the same unit system as `mu`.
+        Fluid density, > 0, in the same unit system as `mu`.
     radius : float or array_like
-        Particle radius: a scalar (every particle shares it) or a per-particle array of shape
+        Particle radius, > 0: a scalar (every particle shares it) or a per-particle array of shape
         `(N,)`, `N = dem.num_particles`, in the same physical length units as `flow.spacing`.
         Multi-rank, a per-particle radius must be dem's own (proportional to `dem.get_scales()`,
         the per-particle size dem carries through a migration): after every migration the driver
@@ -71,13 +71,13 @@ class CfdDem:
         The drag law: one of `"stokes"`, `"schiller_naumann"`, `"ergun"`, `"di_felice"`,
         `"wen_yu"`, `"gidaspow"`, `"beetstra"`, `"tang"`.
     dem_substeps : int, default 20
-        Number of DEM sub-steps per fluid step.
+        Number of DEM sub-steps per fluid step, >= 1.
     eps_min : float, default 0.05
-        Void-fraction floor: a division guard for the 1/eps factors (drag closures, the porous
-        projection), not a physical packing limit -- the minimum voidage depends on particle shape
-        and size distribution, so the floor must not clamp real voidage. A trilinear deposit on
-        cells of about one particle diameter is noisy and can drive a cell's eps towards 0; use
-        `smooth_length` (~1.5 d_p) to make eps a proper volume average.
+        Void-fraction floor, in (0, 1) (dimensionless): a division guard for the 1/eps factors
+        (drag closures, the porous projection), not a physical packing limit -- the minimum
+        voidage depends on particle shape and size distribution, so the floor must not clamp real
+        voidage. A trilinear deposit on cells of about one particle diameter is noisy and can drive
+        a cell's eps towards 0; use `smooth_length` (~1.5 d_p) to make eps a proper volume average.
     smooth_length : float, default 0.0
         Physical width of the void-fraction (porosity) diffusion filter; `0.0` disables smoothing.
         A warning is raised if it is left too small relative to the particle diameter and the
@@ -103,13 +103,17 @@ class CfdDem:
         deferred-correction TVD). If `False`, the gas is Stokes-like: drag, viscous and pressure
         terms only, with no inertia.
     gravity : tuple of float, default (0.0, 0.0, 0.0)
-        Constant physical acceleration applied to the particles every DEM sub-step, and used by the
-        stiff-safe drag cap's gravity-exact correction.
+        Constant physical acceleration (length/time^2 units, three finite values) applied to the
+        particles every DEM sub-step, and used by the stiff-safe drag cap's gravity-exact
+        correction.
 
     Raises
     ------
     ValueError
-        If `flow.spacing` is anisotropic.
+        If `flow.spacing` is anisotropic, or an argument is outside the range stated above.
+    TypeError
+        If `flow`/`dem` is not a solver/simulation, a number or flag has the wrong kind (a string
+        flag is refused: `bool("no")` is True), or `periodic`/`gravity` is not a 3-sequence.
     """
 
     def __init__(self, flow, dem, *, fluid_dt, mu, rho, radius, drag="schiller_naumann",
@@ -794,7 +798,8 @@ class CfdDem:
 
         A moving multi-rank CfdDem already runs this once at construction, with the default gamma,
         so the coupled run owns one partition from the start; call it again as the particle
-        distribution evolves."""
+        distribution evolves. `gamma` (>= 0, dimensionless) is the cost of one particle in fluid
+        cells."""
         _checks.nonneg("CfdDem.rebalance", "gamma", gamma, "dimensionless: cost of one particle "
                        "in fluid cells")
         if not self.mpi:

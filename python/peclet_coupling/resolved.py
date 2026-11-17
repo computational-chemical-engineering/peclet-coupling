@@ -76,28 +76,29 @@ class ResolvedCfdDem:
         The Lagrangian particle simulation. `dem.num_particles` fixes the grain count `self.n` for
         the life of this driver.
     radius : float
-        The single sphere radius shared by every grain (one `kSphere` node is installed for all
-        instances), in the same length units as `flow`'s scene.
+        The single sphere radius (> 0) shared by every grain (one `kSphere` node is installed for
+        all instances), in the same length units as `flow`'s scene.
     mu : float
-        Fluid dynamic viscosity, in the caller's unit system (passed straight through to `flow`,
-        with no conversion).
+        Fluid dynamic viscosity (>= 0), in the caller's unit system (passed straight through to
+        `flow`, with no conversion).
     rho : float
-        Fluid density, in the same unit system as `mu`.
+        Fluid density (> 0), in the same unit system as `mu`.
     fluid_dt : float
-        The fluid time step, passed straight to `flow.set_dt`. DEM advances `dem_substeps`
+        The fluid time step (> 0), passed straight to `flow.set_dt`. DEM advances `dem_substeps`
         sub-steps of `fluid_dt / dem_substeps` per fluid step, holding the fluid force (and torque)
         constant over them.
     dem_substeps : int, default 20
-        Number of DEM sub-steps per fluid step.
+        Number of DEM sub-steps per fluid step, >= 1.
     periodic : tuple of bool, default (True, True, True)
         Per-axis periodicity `(bx, by, bz)`. The flow scene supports only an all-periodic or an
         all-non-periodic box; a mixed triple raises `ValueError`.
     gravity : tuple of float, default (0.0, 0.0, 0.0)
-        Physical acceleration used, together with `rho_p` and `buoyancy`, to add each grain's net
-        gravitational/buoyant force to the hydrodynamic force before handing it to DEM.
+        Physical acceleration (length/time^2 units, three finite values) used, together with
+        `rho_p` and `buoyancy`, to add each grain's net gravitational/buoyant force to the
+        hydrodynamic force before handing it to DEM.
     rho_p : float, optional
-        Particle density. If `None` (the default), no gravity/buoyancy force is added by this
-        driver -- only the hydrodynamic force/torque is passed to DEM.
+        Particle density (> 0, the units of `rho`). If `None` (the default), no gravity/buoyancy
+        force is added by this driver -- only the hydrodynamic force/torque is passed to DEM.
     move_particles : bool, default True
         If `False`, the scene is installed once at construction and never rebuilt or moved, and DEM
         is never stepped or given forces/torques; only the (static) hydrodynamic load is computed
@@ -123,9 +124,11 @@ class ResolvedCfdDem:
     Raises
     ------
     ValueError
-        If `periodic` is a mixed triple, or `force_method` is not `"reaction"` or `"traction"`.
+        If `periodic` is a mixed triple, `force_method` is not `"reaction"` or `"traction"`, or an
+        argument is outside the range stated above.
     TypeError
-        If `periodic` is not a 3-sequence of bool.
+        If `periodic` is not a 3-sequence of bool, `flow`/`dem` is not a solver/simulation, or a
+        number or flag has the wrong kind (a string flag is refused).
     """
 
     def __init__(self, flow, dem, *, radius, mu, rho, fluid_dt, dem_substeps=20,
