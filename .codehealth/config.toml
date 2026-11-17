@@ -9,7 +9,8 @@
 # coupling has no state_hash.py: the drive_hash tier is one inline, deterministic run (a CfdDem step with porous
 # deposit + drag, a ResolvedCfdDem step) whose drag, void fraction, fluid velocity and hydrodynamic force are hashed
 # byte for byte. The api tier dumps inspect.signature of every public name plus the extension's __nb_signature__s.
-# Traps: OMP_NUM_THREADS=1 (bitwise at one thread); the three ctests skip nothing (no fail_regex hits at base).
+# Traps: OMP_NUM_THREADS=1 (bitwise at one thread). Every tier configures and builds for itself: the base side
+# runs only the behaviour tiers (no build_host), so a tier that assumed build_host's tree found none (WO-35).
 schema = 1
 
 [profiles]
@@ -57,7 +58,12 @@ timeout = 2400
 skip_exit = 77
 fail_regex = '\*\*\*Skipped|Not Run|No tests were found'
 detect_exit = [8]
-cmd = '''cmake --build {repo}/build_health_host -j16 >/dev/null \
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$PECLET_SUITE/core "-DFETCHCONTENT_SOURCE_DIR_PECLET_SIB_PECLET-CORE=$PECLET_SUITE/core" \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DPECLET_COUPLING_TESTS=ON \
+  -DPECLET_FLOW_BUILD=$PECLET_COUPLING_DEPS/flow -DPECLET_DEM_BUILD=$PECLET_COUPLING_DEPS/dem >/dev/null \
+  && cmake --build {repo}/build_health_host -j16 >/dev/null \
   && ctest --test-dir {repo}/build_health_host -j1 --timeout 1200 --output-on-failure'''
 
 [[gate.tier]]
@@ -66,7 +72,12 @@ kind = "reference"
 cadence = "step"
 timeout = 900
 outputs = ["hashes.txt"]
-cmd = '''cmake --build {repo}/build_health_host -j16 >/dev/null \
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$PECLET_SUITE/core "-DFETCHCONTENT_SOURCE_DIR_PECLET_SIB_PECLET-CORE=$PECLET_SUITE/core" \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DPECLET_COUPLING_TESTS=ON \
+  -DPECLET_FLOW_BUILD=$PECLET_COUPLING_DEPS/flow -DPECLET_DEM_BUILD=$PECLET_COUPLING_DEPS/dem >/dev/null \
+  && cmake --build {repo}/build_health_host -j16 >/dev/null \
   && PYTHONPATH={repo}/build_health_host:$PECLET_COUPLING_DEPS/flow:$PECLET_COUPLING_DEPS/dem \
      python - > {out}/hashes.txt <<'PY' || exit 1
 import hashlib
@@ -126,7 +137,12 @@ kind = "reference"
 cadence = "step"
 timeout = 600
 outputs = ["signatures.txt"]
-cmd = '''cmake --build {repo}/build_health_host -j16 >/dev/null \
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$PECLET_SUITE/core "-DFETCHCONTENT_SOURCE_DIR_PECLET_SIB_PECLET-CORE=$PECLET_SUITE/core" \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DPECLET_COUPLING_TESTS=ON \
+  -DPECLET_FLOW_BUILD=$PECLET_COUPLING_DEPS/flow -DPECLET_DEM_BUILD=$PECLET_COUPLING_DEPS/dem >/dev/null \
+  && cmake --build {repo}/build_health_host -j16 >/dev/null \
   && PYTHONPATH={repo}/build_health_host:$PECLET_COUPLING_DEPS/flow:$PECLET_COUPLING_DEPS/dem \
      python - > {out}/signatures.txt <<'PY' || exit 1
 import inspect
