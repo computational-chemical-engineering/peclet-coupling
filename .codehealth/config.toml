@@ -13,12 +13,41 @@
 # runs only the behaviour tiers (no build_host), so a tier that assumed build_host's tree found none (WO-35).
 schema = 1
 
+# Ratchet scope (WO-23, 2026-11-20): every first-party C++ and Python source except tests, build trees,
+# vendored code, tooling and evidence scripts under docs/. Zones (layers U/H/K of the code-health plan):
+# user = Python and binding TUs, device = Kokkos kernels, host = the rest. Ratchet: .codehealth/ratchet.sh.
 [profiles]
 python = "python@0"
-cpp = "cpp@0"
+cpp = "cpp@1"
 
 [scope]
-include = ["python/*", "src/*"]
+include = ["*"]
+exclude = ["tests/*", "*/tests/*", "test_*.py", "*/test_*.py", "*/conftest.py", "build*/*", "third_party/*",
+           "extern/*", "_deps/*", ".codehealth/*", "docs/*", "doc/*"]
+
+[[zones]]
+name = "user"
+paths = ["*.py", "src/*_bindings.cpp"]
+[[zones]]
+name = "device"
+paths = ["src/coupling_kernels.hpp", "src/drag.hpp"]
+[[zones]]
+name = "device"
+markers = ["KOKKOS_INLINE_FUNCTION", "KOKKOS_FUNCTION", "KOKKOS_FORCEINLINE_FUNCTION", "KOKKOS_LAMBDA",
+           "KOKKOS_CLASS_LAMBDA"]
+[[zones]]
+name = "host"
+
+# Documentation references (`codehealth docs`). Python references are not resolved (no python_roots): the
+# package ships its Python from packaging/ under other file names. Records get the NEW check only; the
+# last seven record globs (WO-23) classify campaign records, whose references name scratch and study files
+# outside the repo. The tool has no per-reference ignore, so no living doc is excluded.
+[docs]
+include = ["*.md", "**/*.md", "**/*.ipynb"]
+exclude = ["build*/**", "extern/**", "third_party/**", "**/archive/**", "**/_deps/**"]
+records = ["**/DECISIONS*.md", "**/decisions/**", "CHANGELOG.md", "**/CHANGELOG.md", "**/*LOG*.md", "**/*_log.md",
+           "**/history/**", ".codehealth/*", "*/briefs/*", "*_brief*.md", "*BRIEF*.md", "*_STATE.md",
+           "*_evidence/*", "*_literature/*"]
 
 [gate]
 frozen = ["cmake/*"]
